@@ -1,0 +1,3 @@
+Warehouse East reported Widget demand in January.
+Gadget inventory in the West remained stable.
+Cancelled orders should be excluded from fulfilled-unit totals.
