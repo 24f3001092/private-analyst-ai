@@ -36,3 +36,7 @@ class AuthorizationError(PrivateAnalystError):
 
 class IsolationError(PrivateAnalystError):
     pass
+
+
+class AuditLogError(PrivateAnalystError):
+    pass

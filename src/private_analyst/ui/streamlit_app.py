@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import sqlite3
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +21,7 @@ from private_analyst.config import load_config
 from private_analyst.documents.index import LocalTextIndex
 from private_analyst.documents.ocr import ocr_image
 from private_analyst.documents.pdf import extract_pdf_text
-from private_analyst.exceptions import AuthenticationError, PrivateAnalystError
+from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError
 from private_analyst.ingestion.loader import IngestResult, load_tabular
 from private_analyst.reports.exporters import analysis_metadata, report_markdown, to_csv_bytes, to_excel_bytes
 from private_analyst.reports.pdf_report import to_pdf_bytes
@@ -34,6 +35,10 @@ from private_analyst.audit.logger import AuditLog
 @st.cache_resource
 def _get_session_manager(idle_minutes: int) -> SessionManager:
     return SessionManager(idle_timeout_minutes=idle_minutes)
+
+
+def _get_audit_log(cfg) -> AuditLog:
+    return AuditLog(cfg.resolved_data_dir() / "app.db")
 
 
 def _desktop_user(edition: str = "desktop") -> User:
@@ -74,15 +79,36 @@ def _login(cfg) -> None:
     password = st.text_input("Password", type="password")
     if st.button("Sign in"):
         store = UserStore(cfg.resolved_data_dir() / "app.db")
+        log = _get_audit_log(cfg)
         try:
             authenticated_user = store.authenticate(org, username, password)
             mgr = _get_session_manager(cfg.server.session_idle_minutes)
             token = mgr.create_session(authenticated_user.id, authenticated_user.org_id)
+            try:
+                log.record(
+                    authenticated_user.org_id,
+                    authenticated_user.username,
+                    "login_success",
+                    f"User logged in with role '{authenticated_user.role}'",
+                )
+            except AuditLogError:
+                mgr.destroy_session(token)
+                st.error("Audit subsystem error: sign-in cannot proceed without audit logging.")
+                return
             st.session_state.user = authenticated_user
             st.session_state.session_token = token
             st.session_state.last_activity = datetime.now(timezone.utc)
             st.rerun()
         except AuthenticationError:
+            try:
+                log.record(
+                    org.strip() or "unauthenticated",
+                    username.strip() or None,
+                    "login_failure",
+                    "Authentication failed: invalid credentials",
+                )
+            except AuditLogError:
+                pass
             st.error("Sign-in failed.")
 
 
@@ -105,6 +131,8 @@ def _sidebar(cfg) -> None:
             if token:
                 mgr = _get_session_manager(cfg.server.session_idle_minutes)
                 mgr.destroy_session(token)
+            log = _get_audit_log(cfg)
+            log.record(user.org_id, user.username, "logout", "User signed out")
             st.session_state.user = None
             st.session_state.session_token = None
             st.session_state.ingest = None
@@ -114,12 +142,25 @@ def _sidebar(cfg) -> None:
 
 def _check_session_timeout(cfg) -> bool:
     if cfg.server.edition == "server" or cfg.server.require_auth:
-        if st.session_state.get("user") is not None:
+        user_in_state = st.session_state.get("user")
+        if user_in_state is not None:
             token = st.session_state.get("session_token")
             mgr = _get_session_manager(cfg.server.session_idle_minutes)
-            if not token or mgr.validate_session(token) is None:
+            sess = mgr.validate_session(token) if token else None
+            is_valid = (
+                sess is not None
+                and sess.user_id == user_in_state.id
+                and sess.org_id == user_in_state.org_id
+            )
+            if not is_valid:
                 if token:
                     mgr.destroy_session(token)
+                _get_audit_log(cfg).record(
+                    user_in_state.org_id,
+                    user_in_state.username,
+                    "session_timeout",
+                    "Session expired due to inactivity or invalid session state",
+                )
                 st.session_state.user = None
                 st.session_state.session_token = None
                 st.session_state.ingest = None
@@ -138,9 +179,29 @@ def _import_tab(cfg, user: User) -> None:
     if uploaded is None:
         st.session_state.ingest = st.session_state.ingest
         return
+    log = _get_audit_log(cfg)
     try:
-        ingest = load_tabular(uploaded.getvalue(), uploaded.name, cfg.limits)
+        raw_bytes = uploaded.getvalue()
+        ingest = load_tabular(raw_bytes, uploaded.name, cfg.limits)
+        file_sig = (uploaded.name, len(raw_bytes))
+        if st.session_state.get("_last_ingested_file") != file_sig:
+            st.session_state["_last_ingested_file"] = file_sig
+            log.record(
+                user.org_id,
+                user.username,
+                "ingest_table",
+                f"Table: '{Path(ingest.source_name).stem}', Rows: {ingest.frame.shape[0]}, Cols: {ingest.frame.shape[1]}",
+            )
     except PrivateAnalystError as exc:
+        fail_sig = (uploaded.name, len(raw_bytes), exc.__class__.__name__)
+        if st.session_state.get("_last_failed_file") != fail_sig:
+            st.session_state["_last_failed_file"] = fail_sig
+            log.record(
+                user.org_id,
+                user.username,
+                "ingest_table_failure",
+                f"File: '{Path(uploaded.name).stem}', Reason: {exc.__class__.__name__}",
+            )
         st.error(str(exc))
         return
     st.session_state.ingest = ingest
@@ -194,7 +255,7 @@ def _dashboard_tab() -> None:
         st.write("No numeric columns were detected.")
 
 
-def _ask_tab(cfg) -> None:
+def _ask_tab(cfg, user: User) -> None:
     ingest: IngestResult | None = st.session_state.ingest
     if ingest is None:
         st.info("Import a table before asking questions.")
@@ -205,6 +266,12 @@ def _ask_tab(cfg) -> None:
         explanation = explain_results(result, question, cfg.ai)
         st.session_state.last_result = result
         st.session_state.last_explanation = explanation
+        _get_audit_log(cfg).record(
+            user.org_id,
+            user.username,
+            "run_analysis",
+            f"Operation: {result.intent}, Status: {result.status}",
+        )
     result = st.session_state.last_result
     explanation = st.session_state.last_explanation
     if result is None or explanation is None:
@@ -231,6 +298,9 @@ def _ask_tab(cfg) -> None:
 def _sql_tab(cfg, user: User) -> None:
     st.header("DuckDB SQL Console")
     st.caption("Execute read-only SQL queries in memory via DuckDB. No mutations are allowed.")
+    if not can(user, "analyze"):
+        st.error("You do not have permission to execute analytical queries.")
+        return
     ingest: IngestResult | None = st.session_state.ingest
     if ingest is None:
         st.info("Import a table file first to enable SQL querying.")
@@ -263,8 +333,15 @@ def _sql_tab(cfg, user: User) -> None:
 
     col1, col2 = st.columns([1, 4])
     if col1.button("Run Query"):
+        log = _get_audit_log(cfg)
         try:
             res = console.execute_query(query, timeout_seconds=cfg.limits.max_query_seconds)
+            log.record(
+                user.org_id,
+                user.username,
+                "sql_query",
+                f"Rows: {res.row_count}, Truncated: {res.truncated}",
+            )
             st.success(f"Query returned {res.row_count} row(s).{' (Truncated to limit)' if res.truncated else ''}")
             if res.rows:
                 df_res = pd.DataFrame(res.rows)
@@ -274,8 +351,20 @@ def _sql_tab(cfg, user: User) -> None:
             else:
                 st.info("Query returned no rows.")
         except PrivateAnalystError as exc:
+            log.record(
+                user.org_id,
+                user.username,
+                "sql_query_failure",
+                f"Status: rejected, Reason: {exc.__class__.__name__}",
+            )
             st.error(str(exc))
         except Exception as exc:
+            log.record(
+                user.org_id,
+                user.username,
+                "sql_query_failure",
+                f"Status: error, Reason: {exc.__class__.__name__}",
+            )
             st.error(f"Query execution error: {type(exc).__name__}")
 
 
@@ -342,6 +431,12 @@ def _ml_tab(cfg, user: User) -> None:
                 st.error("Please select at least one feature column.")
                 return
             result = run_classification(frame, target_col, selected_features)
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "ml_classification",
+                f"Task: classification, Features: {len(selected_features)}, Status: {result.status}",
+            )
             _render_ml_result(result)
 
     elif task.startswith("Linear Regression"):
@@ -360,6 +455,12 @@ def _ml_tab(cfg, user: User) -> None:
                 st.error("Please select at least one feature column.")
                 return
             result = run_regression(frame, target_col, selected_features)
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "ml_regression",
+                f"Task: regression, Features: {len(selected_features)}, Status: {result.status}",
+            )
             _render_ml_result(result)
 
     elif task.startswith("Clustering"):
@@ -374,6 +475,12 @@ def _ml_tab(cfg, user: User) -> None:
                 st.error("Please select at least one numeric feature column.")
                 return
             result = run_clustering(frame, selected_features, n_clusters=k)
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "ml_clustering",
+                f"Task: clustering, k: {k}, Features: {len(selected_features)}, Status: {result.status}",
+            )
             _render_ml_result(result)
 
     elif task.startswith("Anomaly"):
@@ -385,6 +492,12 @@ def _ml_tab(cfg, user: User) -> None:
         multiplier = st.slider("IQR Multiplier (default 1.5)", min_value=1.0, max_value=3.0, value=1.5, step=0.1)
         if st.button("Detect Outliers"):
             res = detect_iqr_anomalies(frame, col, multiplier=multiplier)
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "anomaly_detection",
+                f"Task: anomaly_detection, Multiplier: {multiplier}, Outliers: {res.outlier_count}",
+            )
             c1, c2, c3 = st.columns(3)
             c1.metric("Outliers Detected", res.outlier_count)
             c2.metric("Lower Fence", f"{res.lower:.4f}")
@@ -406,6 +519,12 @@ def _ml_tab(cfg, user: User) -> None:
         if st.button("Calculate Forecast"):
             vals = frame[col].dropna().tolist()
             res = linear_trend_forecast(vals, periods=periods)
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "trend_forecast",
+                f"Task: trend_forecast, Horizon: {periods}, Status: {res.get('status', 'success')}",
+            )
             if res.get("status") == "insufficient_data":
                 st.error(res["caveat"])
             else:
@@ -445,6 +564,7 @@ def _documents_tab(cfg, user: User) -> None:
         data = uploaded.getvalue()
         name = uploaded.name
         suffix = Path(name).suffix.lower()
+        log = _get_audit_log(cfg)
         try:
             if suffix == ".pdf":
                 extract = extract_pdf_text(data, name, cfg.limits)
@@ -460,8 +580,10 @@ def _documents_tab(cfg, user: User) -> None:
                     added = 0
                 else:
                     added = st.session_state.index.add_plain_text(name, ocr.text)
+            log.record(user.org_id, user.username, "index_document", f"File: '{Path(name).name}', Passages: {added}")
             st.success(f"Indexed {added} passage(s) from {name}.")
         except PrivateAnalystError as exc:
+            log.record(user.org_id, user.username, "index_document_failure", f"File: '{Path(name).name}', Reason: {exc.__class__.__name__}")
             st.error(str(exc))
     query = st.text_input("Search indexed passages")
     if query:
@@ -477,10 +599,11 @@ def _documents_tab(cfg, user: User) -> None:
         victim = st.selectbox("Delete document from index", names)
         if st.button("Delete"):
             st.session_state.index.delete_document(victim)
+            _get_audit_log(cfg).record(user.org_id, user.username, "delete_document", f"File: '{Path(victim).name}'")
             st.success("Removed from the in-memory index.")
 
 
-def _reports_tab(user: User) -> None:
+def _reports_tab(cfg, user: User) -> None:
     ingest: IngestResult | None = st.session_state.ingest
     result = st.session_state.last_result
     explanation = st.session_state.last_explanation
@@ -489,16 +612,33 @@ def _reports_tab(user: User) -> None:
         return
     st.write("Exports are created locally. Choose what to include.")
     include_ai = st.checkbox("Include AI explanation in exports", value=False)
-    st.download_button("Download table CSV", to_csv_bytes(ingest.frame), file_name="table.csv")
+    log = _get_audit_log(cfg)
+    st.download_button(
+        "Download table CSV",
+        to_csv_bytes(ingest.frame),
+        file_name="table.csv",
+        on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: table, Format: delimited, Source: '{Path(ingest.source_name).stem}'"),
+    )
     if can(user, "export"):
-        st.download_button("Download table Excel", to_excel_bytes(ingest.frame), file_name="table.xlsx")
+        st.download_button(
+            "Download table Excel",
+            to_excel_bytes(ingest.frame),
+            file_name="table.xlsx",
+            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: table, Format: xlsx, Source: '{Path(ingest.source_name).stem}'"),
+        )
     if result and explanation:
         text = report_markdown(result, explanation["text"], include_ai)
-        st.download_button("Download markdown report", text.encode("utf-8"), file_name="report.md")
+        st.download_button(
+            "Download markdown report",
+            text.encode("utf-8"),
+            file_name="report.md",
+            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: report, Format: md, AI included: {include_ai}"),
+        )
         st.download_button(
             "Download PDF report",
             to_pdf_bytes(result, explanation["text"], include_ai),
             file_name="report.pdf",
+            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: report, Format: pdf, AI included: {include_ai}"),
         )
         st.json(analysis_metadata(ingest.source_name))
     else:
@@ -528,8 +668,14 @@ def _settings_tab(cfg, user: User) -> None:
             store = UserStore(cfg.resolved_data_dir() / "app.db")
             try:
                 store.create_user(org, username, password, role)
+                _get_audit_log(cfg).record(
+                    user.org_id, user.username, "create_user", f"Created user '{username}' with role '{role}' in org '{org}'"
+                )
                 st.success("User created.")
-            except PrivateAnalystError as exc:
+            except (PrivateAnalystError, sqlite3.IntegrityError) as exc:
+                _get_audit_log(cfg).record(
+                    user.org_id, user.username, "create_user_failure", f"Failed creating user '{username}': {exc.__class__.__name__}"
+                )
                 st.error(str(exc))
     st.subheader("Encryption at Rest")
     keystore = SecureKeyStore(cfg.resolved_data_dir() / "master.key")
@@ -547,6 +693,9 @@ def _settings_tab(cfg, user: User) -> None:
             else:
                 try:
                     keystore.initialize(master_pw)
+                    _get_audit_log(cfg).record(
+                        user.org_id, user.username, "init_keystore", "Master key store initialized"
+                    )
                     st.success("Master key store initialized successfully.")
                     st.rerun()
                 except Exception as exc:
@@ -573,6 +722,9 @@ def _settings_tab(cfg, user: User) -> None:
                     with tempfile.TemporaryDirectory() as tmp_dest:
                         archive_path = create_backup(cfg.resolved_data_dir(), Path(tmp_dest), key=key)
                         archive_bytes = archive_path.read_bytes()
+                        _get_audit_log(cfg).record(
+                            user.org_id, user.username, "create_backup", f"Archive: '{archive_path.name}', Bytes: {len(archive_bytes)}"
+                        )
                         st.download_button(
                             label=f"Download {archive_path.name}",
                             data=archive_bytes,
@@ -581,6 +733,9 @@ def _settings_tab(cfg, user: User) -> None:
                         )
                         st.success(f"Backup prepared ({len(archive_bytes):,} bytes). Click above to save archive.")
                 except Exception as exc:
+                    _get_audit_log(cfg).record(
+                        user.org_id, user.username, "create_backup_failure", f"Backup failed: {exc.__class__.__name__}"
+                    )
                     st.error(f"Failed to create backup: {exc}")
 
     st.subheader("Audit log")
@@ -625,7 +780,7 @@ def main() -> None:
     with tabs[1]:
         _dashboard_tab()
     with tabs[2]:
-        _ask_tab(cfg)
+        _ask_tab(cfg, st.session_state.user)
     with tabs[3]:
         _sql_tab(cfg, st.session_state.user)
     with tabs[4]:
@@ -633,7 +788,7 @@ def main() -> None:
     with tabs[5]:
         _documents_tab(cfg, st.session_state.user)
     with tabs[6]:
-        _reports_tab(st.session_state.user)
+        _reports_tab(cfg, st.session_state.user)
     with tabs[7]:
         _settings_tab(cfg, st.session_state.user)
 
