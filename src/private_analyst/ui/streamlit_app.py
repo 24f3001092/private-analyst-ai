@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -31,6 +32,8 @@ from private_analyst.version import PRODUCT_NAME, __version__
 from private_analyst.viz.charts import bar_sum, histogram, missingness
 from private_analyst.audit.logger import AuditLog
 
+logger = logging.getLogger(__name__)
+
 
 @st.cache_resource
 def _get_session_manager(idle_minutes: int) -> SessionManager:
@@ -39,6 +42,39 @@ def _get_session_manager(idle_minutes: int) -> SessionManager:
 
 def _get_audit_log(cfg) -> AuditLog:
     return AuditLog(cfg.resolved_data_dir() / "app.db")
+
+
+def _safe_record_export_requested(
+    cfg,
+    user: User,
+    target: str,
+    format_name: str,
+    extra_detail: str | None = None,
+) -> None:
+    """Record an export_requested audit event safely without letting audit failures abort callbacks."""
+    detail = f"Target: {target}, Format: {format_name}"
+    if extra_detail:
+        detail = f"{detail}, {extra_detail}"
+    try:
+        _get_audit_log(cfg).record(
+            user.org_id,
+            user.username,
+            "export_requested",
+            detail,
+        )
+    except AuditLogError:
+        # Deliberately caught: callback must not crash if the audit database is unavailable.
+        logger.warning(
+            "Audit log write failed for export_requested event (user=%s, org=%s, target=%s).",
+            user.username,
+            user.org_id,
+            target,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Unexpected error recording export_requested audit event: %s",
+            type(exc).__name__,
+        )
 
 
 def _desktop_user(edition: str = "desktop") -> User:
@@ -128,15 +164,20 @@ def _sidebar(cfg) -> None:
     if cfg.server.require_auth:
         if st.sidebar.button("Sign out"):
             token = st.session_state.get("session_token")
-            if token:
-                mgr = _get_session_manager(cfg.server.session_idle_minutes)
-                mgr.destroy_session(token)
-            log = _get_audit_log(cfg)
-            log.record(user.org_id, user.username, "logout", "User signed out")
-            st.session_state.user = None
-            st.session_state.session_token = None
-            st.session_state.ingest = None
-            st.session_state.duckdb_console = None
+            try:
+                if token:
+                    mgr = _get_session_manager(cfg.server.session_idle_minutes)
+                    mgr.destroy_session(token)
+                log = _get_audit_log(cfg)
+                log.record(user.org_id, user.username, "logout", "User signed out")
+            except AuditLogError:
+                # Deliberately suppressed: audit storage failure must not prevent client session teardown.
+                pass
+            finally:
+                st.session_state.user = None
+                st.session_state.session_token = None
+                st.session_state.ingest = None
+                st.session_state.duckdb_console = None
             st.rerun()
 
 
@@ -153,18 +194,23 @@ def _check_session_timeout(cfg) -> bool:
                 and sess.org_id == user_in_state.org_id
             )
             if not is_valid:
-                if token:
-                    mgr.destroy_session(token)
-                _get_audit_log(cfg).record(
-                    user_in_state.org_id,
-                    user_in_state.username,
-                    "session_timeout",
-                    "Session expired due to inactivity or invalid session state",
-                )
-                st.session_state.user = None
-                st.session_state.session_token = None
-                st.session_state.ingest = None
-                st.session_state.duckdb_console = None
+                try:
+                    if token:
+                        mgr.destroy_session(token)
+                    _get_audit_log(cfg).record(
+                        user_in_state.org_id,
+                        user_in_state.username,
+                        "session_timeout",
+                        "Session expired due to inactivity or invalid session state",
+                    )
+                except AuditLogError:
+                    # Deliberately suppressed: audit storage failure must not interrupt session purge.
+                    pass
+                finally:
+                    st.session_state.user = None
+                    st.session_state.session_token = None
+                    st.session_state.ingest = None
+                    st.session_state.duckdb_console = None
                 st.warning("Session expired due to inactivity. Please sign in again.")
                 return True
             mgr.touch_session(token)
@@ -334,15 +380,53 @@ def _sql_tab(cfg, user: User) -> None:
     col1, col2 = st.columns([1, 4])
     if col1.button("Run Query"):
         log = _get_audit_log(cfg)
+        query_success = False
+        res = None
         try:
             res = console.execute_query(query, timeout_seconds=cfg.limits.max_query_seconds)
-            log.record(
-                user.org_id,
-                user.username,
-                "sql_query",
-                f"Rows: {res.row_count}, Truncated: {res.truncated}",
-            )
-            st.success(f"Query returned {res.row_count} row(s).{' (Truncated to limit)' if res.truncated else ''}")
+            query_success = True
+        except PrivateAnalystError as exc:
+            try:
+                log.record(
+                    user.org_id,
+                    user.username,
+                    "sql_query_failure",
+                    f"Status: rejected, Reason: {exc.__class__.__name__}",
+                )
+            except AuditLogError:
+                # Deliberately suppressed: audit storage failure must not mask original query validation error
+                pass
+            st.error(str(exc))
+        except Exception as exc:
+            try:
+                log.record(
+                    user.org_id,
+                    user.username,
+                    "sql_query_failure",
+                    f"Status: error, Reason: {exc.__class__.__name__}",
+                )
+            except AuditLogError:
+                # Deliberately suppressed: audit storage failure must not mask original query execution error
+                pass
+            st.error(f"Query execution error: {type(exc).__name__}")
+
+        if query_success and res is not None:
+            audit_recorded = True
+            try:
+                log.record(
+                    user.org_id,
+                    user.username,
+                    "sql_query",
+                    f"Rows: {res.row_count}, Truncated: {res.truncated}",
+                )
+            except AuditLogError:
+                audit_recorded = False
+
+            if audit_recorded:
+                st.success(f"Query returned {res.row_count} row(s).{' (Truncated to limit)' if res.truncated else ''}")
+            else:
+                st.warning(f"Query returned {res.row_count} row(s), but the audit event could not be recorded.")
+
             if res.rows:
                 df_res = pd.DataFrame(res.rows)
                 st.dataframe(df_res, use_container_width=True)
@@ -350,22 +434,6 @@ def _sql_tab(cfg, user: User) -> None:
                 st.download_button("Download Query Results (CSV)", csv_bytes, file_name="query_results.csv")
             else:
                 st.info("Query returned no rows.")
-        except PrivateAnalystError as exc:
-            log.record(
-                user.org_id,
-                user.username,
-                "sql_query_failure",
-                f"Status: rejected, Reason: {exc.__class__.__name__}",
-            )
-            st.error(str(exc))
-        except Exception as exc:
-            log.record(
-                user.org_id,
-                user.username,
-                "sql_query_failure",
-                f"Status: error, Reason: {exc.__class__.__name__}",
-            )
-            st.error(f"Query execution error: {type(exc).__name__}")
 
 
 def _render_ml_result(result) -> None:
@@ -612,19 +680,22 @@ def _reports_tab(cfg, user: User) -> None:
         return
     st.write("Exports are created locally. Choose what to include.")
     include_ai = st.checkbox("Include AI explanation in exports", value=False)
-    log = _get_audit_log(cfg)
     st.download_button(
         "Download table CSV",
         to_csv_bytes(ingest.frame),
         file_name="table.csv",
-        on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: table, Format: delimited, Source: '{Path(ingest.source_name).stem}'"),
+        on_click=lambda: _safe_record_export_requested(
+            cfg, user, "table", "delimited", f"Source: '{Path(ingest.source_name).stem}'"
+        ),
     )
     if can(user, "export"):
         st.download_button(
             "Download table Excel",
             to_excel_bytes(ingest.frame),
             file_name="table.xlsx",
-            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: table, Format: xlsx, Source: '{Path(ingest.source_name).stem}'"),
+            on_click=lambda: _safe_record_export_requested(
+                cfg, user, "table", "xlsx", f"Source: '{Path(ingest.source_name).stem}'"
+            ),
         )
     if result and explanation:
         text = report_markdown(result, explanation["text"], include_ai)
@@ -632,13 +703,17 @@ def _reports_tab(cfg, user: User) -> None:
             "Download markdown report",
             text.encode("utf-8"),
             file_name="report.md",
-            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: report, Format: md, AI included: {include_ai}"),
+            on_click=lambda: _safe_record_export_requested(
+                cfg, user, "report", "md", f"AI included: {include_ai}"
+            ),
         )
         st.download_button(
             "Download PDF report",
             to_pdf_bytes(result, explanation["text"], include_ai),
             file_name="report.pdf",
-            on_click=lambda: log.record(user.org_id, user.username, "export_requested", f"Target: report, Format: pdf, AI included: {include_ai}"),
+            on_click=lambda: _safe_record_export_requested(
+                cfg, user, "report", "pdf", f"AI included: {include_ai}"
+            ),
         )
         st.json(analysis_metadata(ingest.source_name))
     else:
@@ -666,17 +741,39 @@ def _settings_tab(cfg, user: User) -> None:
         role = st.selectbox("Role", ["admin", "analyst", "viewer"])
         if st.button("Create user"):
             store = UserStore(cfg.resolved_data_dir() / "app.db")
+            user_created = False
             try:
                 store.create_user(org, username, password, role)
-                _get_audit_log(cfg).record(
-                    user.org_id, user.username, "create_user", f"Created user '{username}' with role '{role}' in org '{org}'"
-                )
-                st.success("User created.")
+                user_created = True
             except (PrivateAnalystError, sqlite3.IntegrityError) as exc:
-                _get_audit_log(cfg).record(
-                    user.org_id, user.username, "create_user_failure", f"Failed creating user '{username}': {exc.__class__.__name__}"
-                )
+                try:
+                    _get_audit_log(cfg).record(
+                        user.org_id,
+                        user.username,
+                        "create_user_failure",
+                        f"Failed creating user '{username}': {exc.__class__.__name__}",
+                    )
+                except AuditLogError:
+                    # Deliberately suppressed: audit storage failure must not mask original creation error
+                    pass
                 st.error(str(exc))
+
+            if user_created:
+                audit_recorded = True
+                try:
+                    _get_audit_log(cfg).record(
+                        user.org_id,
+                        user.username,
+                        "create_user",
+                        f"Created user '{username}' with role '{role}' in org '{org}'",
+                    )
+                except AuditLogError:
+                    audit_recorded = False
+
+                if audit_recorded:
+                    st.success("User created.")
+                else:
+                    st.warning("User created, but the audit event could not be recorded.")
     st.subheader("Encryption at Rest")
     keystore = SecureKeyStore(cfg.resolved_data_dir() / "master.key")
     if keystore.is_initialized():

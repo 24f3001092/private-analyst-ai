@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from private_analyst.analytics.operations import run_operation
-from private_analyst.analytics.sql_console import DuckDBConsole
+from private_analyst.analytics.sql_console import DuckDBConsole, QueryResult
 from private_analyst.audit.logger import AuditLog, _sanitize
 from private_analyst.auth.users import User, UserStore
 from private_analyst.config import AppConfig
@@ -24,6 +24,7 @@ from private_analyst.ui.streamlit_app import (
     _login,
     _ml_tab,
     _reports_tab,
+    _safe_record_export_requested,
     _settings_tab,
     _sidebar,
     _sql_tab,
@@ -768,3 +769,277 @@ def test_audit_attribution_spoofing_prevention(test_env) -> None:
     # Must NOT exist under other organizations
     org2_events = log.list_for_org("org2")
     assert len(org2_events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Stage 2.1 Audit Resilience & Error Decoupling Tests
+# ---------------------------------------------------------------------------
+
+
+def test_logout_cleanup_on_audit_failure(test_env) -> None:
+    """Fix 1: Session state must be purged during logout even if audit logging raises AuditLogError."""
+    cfg = test_env["cfg"]
+    user = test_env["analyst"]
+    mgr = SessionManager()
+    token = mgr.create_session(user.id, user.org_id)
+
+    mock_ingest = MagicMock()
+    mock_console = MagicMock()
+    state = MockSessionState({
+        "user": user,
+        "session_token": token,
+        "ingest": mock_ingest,
+        "duckdb_console": mock_console,
+    })
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app._get_session_manager", return_value=mgr), \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_st.session_state = state
+        mock_st.sidebar.button.return_value = True
+
+        mock_log = MagicMock()
+        mock_log.record.side_effect = AuditLogError("Audit DB disk full")
+        mock_get_log.return_value = mock_log
+
+        _sidebar(cfg)
+
+        # Verification: Session state was wiped in finally block despite audit write exception
+        assert state["user"] is None
+        assert state["session_token"] is None
+        assert state["ingest"] is None
+        assert state["duckdb_console"] is None
+        assert mock_st.rerun.called
+        assert mgr.validate_session(token) is None
+
+
+def test_timeout_cleanup_on_audit_failure(test_env) -> None:
+    """Fix 2: Expired session state must be wiped even if recording the timeout event fails."""
+    cfg = test_env["cfg"]
+    user = test_env["analyst"]
+    mgr = SessionManager(idle_timeout_minutes=15)
+    token = mgr.create_session(user.id, user.org_id)
+
+    # Force expiration by simulating invalid session
+    state = MockSessionState({
+        "user": user,
+        "session_token": token,
+        "ingest": MagicMock(),
+        "duckdb_console": MagicMock(),
+    })
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app._get_session_manager") as mock_get_mgr, \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_st.session_state = state
+
+        # Mock session manager indicating session is expired / invalid
+        expired_mgr = MagicMock()
+        expired_mgr.validate_session.return_value = None
+        mock_get_mgr.return_value = expired_mgr
+
+        # Mock audit log failing with AuditLogError
+        mock_log = MagicMock()
+        mock_log.record.side_effect = AuditLogError("Audit DB locked")
+        mock_get_log.return_value = mock_log
+
+        timed_out = _check_session_timeout(cfg)
+
+        assert timed_out is True
+        assert state["user"] is None
+        assert state["session_token"] is None
+        assert state["ingest"] is None
+        assert state["duckdb_console"] is None
+        expired_mgr.destroy_session.assert_called_once_with(token)
+        mock_st.warning.assert_called_once()
+        assert "Session expired" in mock_st.warning.call_args[0][0]
+
+
+def test_sql_success_not_mislabeled_on_audit_failure(test_env) -> None:
+    """Fix 3: Successful query completion must not be mislabeled as sql_query_failure if audit logging fails."""
+    cfg = test_env["cfg"]
+    user = test_env["analyst"]
+
+    csv_data = b"col\n1\n2\n3\n"
+    ingest = load_tabular(csv_data, "data.csv", cfg.limits)
+    state = MockSessionState({
+        "ingest": ingest,
+        "duckdb_console": None,
+    })
+
+    mock_console = MagicMock()
+    mock_console.list_tables.return_value = ["data"]
+    mock_console.describe_table.return_value = [{"column_name": "col", "column_type": "BIGINT"}]
+    mock_console.execute_query.return_value = QueryResult(
+        columns=["col"],
+        rows=[{"col": 1}, {"col": 2}, {"col": 3}],
+        row_count=3,
+        truncated=False,
+        sql="SELECT * FROM data",
+    )
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app.DuckDBConsole", return_value=mock_console), \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_st.session_state = state
+        col1 = MagicMock()
+        col1.button.return_value = True
+        mock_st.columns.return_value = [col1, MagicMock()]
+        mock_st.text_area.return_value = "SELECT * FROM data"
+
+        # Audit logger fails
+        mock_log = MagicMock()
+        mock_log.record.side_effect = AuditLogError("Audit database unavailable")
+        mock_get_log.return_value = mock_log
+
+        _sql_tab(cfg, user)
+
+        # Verification:
+        # 1. Query was executed successfully
+        mock_console.execute_query.assert_called_once()
+        # 2. Must NOT call st.error with failure
+        mock_st.error.assert_not_called()
+        # 3. Must warn that query succeeded but audit event could not be recorded
+        mock_st.warning.assert_called_once()
+        assert "Query returned 3 row(s), but the audit event could not be recorded" in mock_st.warning.call_args[0][0]
+        # 4. Results dataframe was still presented to user
+        mock_st.dataframe.assert_called()
+        # 5. Must NOT record sql_query_failure
+        for call in mock_log.record.call_args_list:
+            assert call[0][2] != "sql_query_failure"
+
+
+def test_user_creation_represented_on_audit_failure(test_env) -> None:
+    """Fix 4: Successful user creation must not be reported as failure if subsequent audit logging fails."""
+    cfg = test_env["cfg"]
+    admin_user = test_env["admin"]
+    store = test_env["store"]
+
+    state = MockSessionState({"user": admin_user})
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_st.session_state = state
+        mock_st.text_input.side_effect = lambda label, *args, **kwargs: {
+            "New user organization id": "org1",
+            "New username": "resilient_user",
+            "New password": "ValidPassword123!",
+        }.get(label, "")
+        mock_st.selectbox.return_value = "analyst"
+        mock_st.button.side_effect = lambda label, *args, **kwargs: label == "Create user"
+
+        # Mock audit log failure
+        mock_log = MagicMock()
+        mock_log.record.side_effect = AuditLogError("Audit storage write failure")
+        mock_get_log.return_value = mock_log
+
+        _settings_tab(cfg, admin_user)
+
+        # Verification:
+        # 1. Did not report that user creation failed
+        mock_st.error.assert_not_called()
+        # 2. Displayed warning that user was created but audit event was not recorded
+        mock_st.warning.assert_called_once()
+        assert "User created, but the audit event could not be recorded" in mock_st.warning.call_args[0][0]
+        # 3. User was indeed created in the database and can authenticate
+        created_user = store.authenticate("org1", "resilient_user", "ValidPassword123!")
+        assert created_user.username == "resilient_user"
+        assert created_user.role == "analyst"
+
+
+def test_export_callbacks_handle_audit_failure(test_env) -> None:
+    """Fix 5: Export callbacks must not propagate unhandled exceptions if audit recording fails."""
+    cfg = test_env["cfg"]
+    user = test_env["admin"]
+
+    csv_data = b"product,revenue,units\nWidget,100,5\n"
+    ingest = load_tabular(csv_data, "sales.csv", cfg.limits)
+    mock_result = MagicMock(
+        intent="summarize",
+        status="success",
+        observed={"source": "sales.csv"},
+        calculated={"revenue_sum": 100},
+    )
+    state = MockSessionState({
+        "ingest": ingest,
+        "last_result": mock_result,
+        "last_explanation": {"text": "Explanation narrative."},
+    })
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_st.session_state = state
+
+        # Mock audit logger failing
+        mock_log = MagicMock()
+        mock_log.record.side_effect = AuditLogError("Audit log table locked")
+        mock_get_log.return_value = mock_log
+
+        _reports_tab(cfg, user)
+
+        # Trigger all download_button on_click callbacks; NONE must raise
+        for call in mock_st.download_button.call_args_list:
+            on_click = call.kwargs.get("on_click")
+            if on_click:
+                # Should cleanly catch and log warning without raising
+                on_click()
+
+    # Also test _safe_record_export_requested directly with unhandled Exception
+    with patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_get_log:
+        mock_log = MagicMock()
+        mock_log.record.side_effect = RuntimeError("Unexpected OS crash")
+        mock_get_log.return_value = mock_log
+
+        # Direct call must not raise
+        _safe_record_export_requested(cfg, user, "test_target", "test_fmt", "extra info")
+
+
+def test_genuine_sql_and_duplicate_user_failures_recorded(test_env) -> None:
+    """Fix 6: Genuine SQL failures and duplicate-user failures still follow their correct error paths."""
+    cfg = test_env["cfg"]
+    user = test_env["admin"]
+    log = AuditLog(test_env["db_path"])
+
+    # 1. Genuine SQL query validation failure
+    csv_data = b"col\n1\n2\n3\n"
+    ingest = load_tabular(csv_data, "data.csv", cfg.limits)
+    state = MockSessionState({
+        "ingest": ingest,
+        "duckdb_console": None,
+    })
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st:
+        mock_st.session_state = state
+        col1 = MagicMock()
+        col1.button.return_value = True
+        mock_st.columns.return_value = [col1, MagicMock()]
+        mock_st.text_area.return_value = "SELECT * FROM non_existent_table"
+
+        _sql_tab(cfg, user)
+
+        mock_st.error.assert_called_once()
+        events = log.list_for_org(user.org_id)
+        sql_fail = [e for e in events if e["action"] == "sql_query_failure"]
+        assert len(sql_fail) == 1
+        assert "Status: rejected" in sql_fail[0]["detail"]
+        assert "non_existent_table" not in sql_fail[0]["detail"]
+
+    # 2. Duplicate user creation failure
+    state2 = MockSessionState({"user": user})
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st:
+        mock_st.session_state = state2
+        mock_st.text_input.side_effect = lambda label, *args, **kwargs: {
+            "New user organization id": "org1",
+            "New username": "alice",  # alice already exists in org1
+            "New password": "AnotherPassword123!",
+        }.get(label, "")
+        mock_st.selectbox.return_value = "analyst"
+        mock_st.button.side_effect = lambda label, *args, **kwargs: label == "Create user"
+
+        _settings_tab(cfg, user)
+
+        mock_st.error.assert_called_once()
+        events = log.list_for_org(user.org_id)
+        create_fail = [e for e in events if e["action"] == "create_user_failure"]
+        assert len(create_fail) >= 1
+        assert "alice" in create_fail[0]["detail"]
