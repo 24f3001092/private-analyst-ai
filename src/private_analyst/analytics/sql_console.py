@@ -129,6 +129,7 @@ def _strip_comments(sql: str) -> str:
             i += 2
             while i < n and sql[i] != "\n":
                 i += 1
+            out.append(" ")
             continue
 
         if char == "/" and next_char == "*":
@@ -138,6 +139,7 @@ def _strip_comments(sql: str) -> str:
                     i += 2
                     break
                 i += 1
+            out.append(" ")
             continue
 
         if char == "'":
@@ -302,44 +304,334 @@ def _extract_unquoted_tokens(stmt: str) -> list[str]:
 def _extract_cte_names(cleaned_sql: str) -> set[str]:
     """Extract CTE names defined in WITH [RECURSIVE] cte_name[(cols)] AS (...) clauses."""
     ctes: set[str] = set()
-    pattern = r"\b(?:WITH\s+(?:RECURSIVE\s+)?|,)\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*\([^)]*\))?\s+AS\s*\("
+    pattern = r"\b(?:WITH\s+(?:RECURSIVE\s+)?|,)\s*([A-Za-z_][A-Za-z0-9_]*|\"[^\"]+\")(?:\s*\([^)]*\))?\s+AS\s*\("
     matches = re.finditer(pattern, cleaned_sql, re.IGNORECASE)
     for m in matches:
-        ctes.add(m.group(1).lower())
+        ctes.add(m.group(1).strip('"').lower())
     return ctes
 
 
-def _validate_table_references(cleaned_sql: str, allowed_tables: set[str]) -> None:
-    """Ensure that all table sources in FROM and JOIN refer exclusively to allowed tables/CTEs."""
-    # Check for direct string literal table sources, e.g., FROM 'path' or JOIN "path"
-    if re.search(r"\b(?:FROM|JOIN)\s+['\"]", cleaned_sql, re.IGNORECASE):
-        raise ValidationError("Direct file paths or string literals cannot be used as table sources.")
+@dataclass
+class _SQLToken:
+    text: str
+    kind: str  # 'word', 'string', 'double_quote', 'symbol'
 
-    # Match FROM/JOIN followed by table expressions
-    pattern = r"\b(?:FROM|JOIN)\s+([A-Za-z0-9_.\(\)\"']+)"
-    matches = re.finditer(pattern, cleaned_sql, re.IGNORECASE)
+
+CLAUSE_TERMINATORS: frozenset[str] = frozenset({
+    "WHERE",
+    "GROUP",
+    "HAVING",
+    "WINDOW",
+    "QUALIFY",
+    "ORDER",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "FETCH",
+})
+
+JOIN_KEYWORDS: frozenset[str] = frozenset({
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "CROSS",
+    "NATURAL",
+    "OUTER",
+})
+
+
+def _tokenize_sql(sql: str) -> list[_SQLToken]:
+    """Tokenize SQL into word, quoted string, double-quoted identifier, and symbol tokens."""
+    tokens: list[_SQLToken] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == "'":
+            start = i
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            tokens.append(_SQLToken(sql[start:i], "string"))
+            continue
+        if c == '"':
+            start = i
+            i += 1
+            while i < n:
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            tokens.append(_SQLToken(sql[start:i], "double_quote"))
+            continue
+        if c in "(),;.":
+            tokens.append(_SQLToken(c, "symbol"))
+            i += 1
+            continue
+        if c.isalnum() or c in "_":
+            start = i
+            while i < n and (sql[i].isalnum() or sql[i] in "_"):
+                i += 1
+            tokens.append(_SQLToken(sql[start:i], "word"))
+            continue
+        tokens.append(_SQLToken(c, "symbol"))
+        i += 1
+    return tokens
+
+
+def _find_matching_paren(tokens: list[_SQLToken], start: int) -> int:
+    """Given tokens[start] is '(', return index of matching ')'."""
+    depth = 1
+    i = start + 1
+    n = len(tokens)
+    while i < n and depth > 0:
+        if tokens[i].kind == "symbol" and tokens[i].text == "(":
+            depth += 1
+        elif tokens[i].kind == "symbol" and tokens[i].text == ")":
+            depth -= 1
+        i += 1
+    return i - 1
+
+
+def _extract_table_item(
+    tokens: list[_SQLToken], i: int, n: int
+) -> tuple[str | None, int, list[_SQLToken] | None]:
+    """Parse a single table item starting at index i.
+
+    Returns (source_name, next_index, subquery_tokens_or_None).
+    """
+    if i >= n:
+        return None, i, None
+
+    tok = tokens[i]
+
+    # Subquery in parentheses: (SELECT ...)
+    if tok.kind == "symbol" and tok.text == "(":
+        depth = 1
+        sub_start = i + 1
+        i += 1
+        while i < n and depth > 0:
+            if tokens[i].kind == "symbol" and tokens[i].text == "(":
+                depth += 1
+            elif tokens[i].kind == "symbol" and tokens[i].text == ")":
+                depth -= 1
+            i += 1
+        sub_tokens = tokens[sub_start : i - 1]
+        # Skip alias if present
+        if i < n and tokens[i].kind == "word" and tokens[i].text.upper() == "AS":
+            i += 2
+        elif (
+            i < n
+            and tokens[i].kind in ("word", "double_quote")
+            and tokens[i].text.upper() not in CLAUSE_TERMINATORS
+            and tokens[i].text.upper() not in JOIN_KEYWORDS
+            and tokens[i].text not in (",", ")", ";", "ON", "USING")
+        ):
+            i += 1
+        return None, i, sub_tokens
+
+    # String literal table source e.g. FROM 'secret.csv'
+    if tok.kind == "string":
+        return tok.text, i + 1, None
+
+    # Identifier, multipart identifier, or function call
+    if tok.kind in ("word", "double_quote"):
+        parts = [tok.text]
+        i += 1
+        while i < n and tokens[i].kind == "symbol" and tokens[i].text == ".":
+            i += 1
+            if i < n and tokens[i].kind in ("word", "double_quote"):
+                parts.append(tokens[i].text)
+                i += 1
+            else:
+                parts.append("")
+                break
+
+        name = ".".join(parts)
+
+        # Check if function call e.g. duckdb_functions() or schema.func()
+        if i < n and tokens[i].kind == "symbol" and tokens[i].text == "(":
+            depth = 1
+            i += 1
+            while i < n and depth > 0:
+                if tokens[i].kind == "symbol" and tokens[i].text == "(":
+                    depth += 1
+                elif tokens[i].kind == "symbol" and tokens[i].text == ")":
+                    depth -= 1
+                i += 1
+            # Skip alias if present
+            if i < n and tokens[i].kind == "word" and tokens[i].text.upper() == "AS":
+                i += 2
+            elif (
+                i < n
+                and tokens[i].kind in ("word", "double_quote")
+                and tokens[i].text.upper() not in CLAUSE_TERMINATORS
+                and tokens[i].text.upper() not in JOIN_KEYWORDS
+                and tokens[i].text not in (",", ")", ";", "ON", "USING")
+            ):
+                i += 1
+            return f"{name}()", i, None
+
+        # Plain or schema-qualified identifier
+        # Skip alias if present
+        if i < n and tokens[i].kind == "word" and tokens[i].text.upper() == "AS":
+            i += 2
+        elif (
+            i < n
+            and tokens[i].kind in ("word", "double_quote")
+            and tokens[i].text.upper() not in CLAUSE_TERMINATORS
+            and tokens[i].text.upper() not in JOIN_KEYWORDS
+            and tokens[i].text not in (",", ")", ";", "ON", "USING")
+        ):
+            i += 1
+        return name, i, None
+
+    return None, i + 1, None
+
+
+def _extract_from_tokens(tokens: list[_SQLToken]) -> list[str]:
+    """Recursively extract all table sources from a token stream."""
+    sources: list[str] = []
+    n = len(tokens)
+    i = 0
+
+    while i < n:
+        tok = tokens[i]
+
+        # Parenthesized expression or subquery
+        if tok.kind == "symbol" and tok.text == "(":
+            close_idx = _find_matching_paren(tokens, i)
+            sub_tokens = tokens[i + 1 : close_idx]
+            has_query = any(t.kind == "word" and t.text.upper() in ("SELECT", "WITH") for t in sub_tokens)
+            if has_query:
+                sources.extend(_extract_from_tokens(sub_tokens))
+            i = close_idx + 1
+            continue
+
+        upper = tok.text.upper() if tok.kind == "word" else ""
+
+        if upper == "FROM":
+            i += 1
+            # Read first table item after FROM
+            item, i, sub = _extract_table_item(tokens, i, n)
+            if item:
+                sources.append(item)
+            if sub:
+                sources.extend(_extract_from_tokens(sub))
+
+            # Continue reading comma-separated or join-separated tables in this FROM clause
+            while i < n:
+                t = tokens[i]
+                if t.kind == "symbol" and t.text in (";", ")"):
+                    break
+                if t.kind == "word" and t.text.upper() in CLAUSE_TERMINATORS:
+                    break
+
+                # Comma separates tables
+                if t.kind == "symbol" and t.text == ",":
+                    i += 1
+                    item, i, sub = _extract_table_item(tokens, i, n)
+                    if item:
+                        sources.append(item)
+                    if sub:
+                        sources.extend(_extract_from_tokens(sub))
+                    continue
+
+                # JOIN keyword
+                if t.kind == "word" and t.text.upper() in JOIN_KEYWORDS:
+                    while i < n and tokens[i].kind == "word" and tokens[i].text.upper() in JOIN_KEYWORDS:
+                        i += 1
+                    item, i, sub = _extract_table_item(tokens, i, n)
+                    if item:
+                        sources.append(item)
+                    if sub:
+                        sources.extend(_extract_from_tokens(sub))
+                    continue
+
+                # ON or USING condition in JOIN
+                if t.kind == "word" and t.text.upper() in ("ON", "USING"):
+                    i += 1
+                    while i < n:
+                        if tokens[i].kind == "symbol" and tokens[i].text == "(":
+                            close_idx = _find_matching_paren(tokens, i)
+                            sub_tokens = tokens[i + 1 : close_idx]
+                            if any(x.kind == "word" and x.text.upper() in ("SELECT", "WITH") for x in sub_tokens):
+                                sources.extend(_extract_from_tokens(sub_tokens))
+                            i = close_idx + 1
+                            continue
+                        if tokens[i].kind == "symbol" and tokens[i].text in (",", ";", ")"):
+                            break
+                        if tokens[i].kind == "word" and (
+                            tokens[i].text.upper() in JOIN_KEYWORDS or tokens[i].text.upper() in CLAUSE_TERMINATORS
+                        ):
+                            break
+                        i += 1
+                    continue
+
+                i += 1
+            continue
+
+        i += 1
+
+    return sources
+
+
+def _extract_table_sources(cleaned_sql: str) -> list[str]:
+    """Tokenize SQL and extract all referenced table sources."""
+    tokens = _tokenize_sql(cleaned_sql)
+    return _extract_from_tokens(tokens)
+
+
+def _validate_table_references(cleaned_sql: str, allowed_tables: set[str]) -> None:
+    """Ensure that all table sources refer exclusively to allowed tables/CTEs."""
+    sources = _extract_table_sources(cleaned_sql)
     allowed_lower = {t.lower() for t in allowed_tables}
 
-    for m in matches:
-        target = m.group(1).strip()
-        # Subquery in FROM e.g. FROM (SELECT ...)
-        if target.startswith("("):
-            continue
-        # Function call in table position e.g. FROM read_csv(...)
-        if "(" in target:
-            func_name = target.split("(")[0].strip()
+    if not sources:
+        return
+
+    for target in sources:
+        # Check for direct file paths or string literals
+        if target.startswith("'") or ("/" in target or "\\" in target):
+            raise ValidationError("Direct file paths or string literals cannot be used as table sources.")
+
+        # Check for function call in table position e.g. duckdb_functions()
+        if target.endswith("()"):
+            func_name = target[:-2].strip("\"'")
             raise ValidationError(f"Function call '{func_name}' cannot be used as a table source.")
+
         # Schema-qualified name
         if "." in target:
             parts = target.split(".")
-            if not any(p.lower() in allowed_lower for p in parts):
-                raise ValidationError(f"Access to schema-qualified source '{target}' is not permitted.")
-            continue
+            if len(parts) == 2:
+                schema = parts[0].strip("\"'").lower()
+                tbl = parts[1].strip("\"'").lower()
+                if schema == "main" and tbl in allowed_lower:
+                    continue
+            raise ValidationError(f"Access to schema-qualified source '{target}' is not permitted.")
+
         # Plain identifier
         clean_target = target.strip("\"'").lower()
         if clean_target not in allowed_lower:
+            display_allowed = ", ".join(sorted(allowed_tables)) if allowed_tables else "none"
             raise ValidationError(
-                f"Access to table '{target}' is not allowed. Only registered tables ({', '.join(sorted(allowed_tables)) if allowed_tables else 'none'}) can be queried."
+                f"Access to table '{clean_target}' is not allowed. Only registered tables ({display_allowed}) can be queried."
             )
 
 

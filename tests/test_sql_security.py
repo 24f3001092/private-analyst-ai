@@ -222,3 +222,124 @@ class TestApprovedQueriesFunctionNormally:
         result = sales_console.execute_query("SELECT 42 AS answer, 'safe' AS label")
         assert result.rows[0]["answer"] == 42
         assert result.rows[0]["label"] == "safe"
+
+
+@pytest.fixture
+def data_console() -> DuckDBConsole:
+    console = DuckDBConsole()
+    console.register_dataframe("data", pd.DataFrame({"id": [1, 2], "val": [10, 20]}))
+    return console
+
+
+class TestSecSql01And02Regression:
+    """Regression tests for SEC-SQL-01 (comma joins) and SEC-SQL-02 (schema qualification)."""
+
+    def test_comma_join_duckdb_functions_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="cannot be used as a table source"):
+            data_console.execute_query("SELECT * FROM data, duckdb_functions()")
+
+    def test_comma_join_duckdb_keywords_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="cannot be used as a table source"):
+            data_console.execute_query("SELECT * FROM data, duckdb_keywords()")
+
+    def test_comma_join_subquery_and_invalid_table_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'invalid_table' is not allowed"):
+            data_console.execute_query("SELECT * FROM data, (SELECT 1), invalid_table")
+
+    def test_unknown_schema_qualified_table_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to schema-qualified source 'unknown_schema.data' is not permitted"):
+            data_console.execute_query("SELECT * FROM unknown_schema.data")
+
+    def test_main_schema_registered_table_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query("SELECT * FROM main.data")
+        assert result.row_count == 2
+        assert result.columns == ["id", "val"]
+
+    def test_main_schema_unregistered_table_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to schema-qualified source 'main.invalid_table' is not permitted"):
+            data_console.execute_query("SELECT * FROM main.invalid_table")
+
+    def test_quoted_unknown_schema_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to schema-qualified source"):
+            data_console.execute_query('SELECT * FROM "unknown_schema"."data"')
+
+    def test_quoted_main_schema_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query('SELECT * FROM "main"."data"')
+        assert result.row_count == 2
+
+    def test_unquoted_main_quoted_table_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query('SELECT * FROM main."data"')
+        assert result.row_count == 2
+
+    def test_quoted_main_unquoted_table_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query('SELECT * FROM "main".data')
+        assert result.row_count == 2
+
+    def test_comment_bypass_attempts_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError):
+            data_console.execute_query("SELECT * FROM data, /* bypass */ duckdb_functions()")
+        with pytest.raises(ValidationError):
+            data_console.execute_query("SELECT * FROM data, -- comment\n duckdb_functions()")
+        with pytest.raises(ValidationError):
+            data_console.execute_query("SELECT * FROM data, /* sub */ (SELECT 1), /* inv */ invalid_table")
+
+    def test_nested_subquery_in_where_unregistered_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query("SELECT * FROM data WHERE id IN (SELECT id FROM secret_table)")
+
+    def test_nested_subquery_in_where_registered_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query("SELECT * FROM data WHERE id IN (SELECT id FROM data WHERE val > 10)")
+        assert result.row_count == 1
+        assert result.rows[0]["id"] == 2
+
+    def test_nested_subquery_in_from_unregistered_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query("SELECT * FROM (SELECT * FROM secret_table)")
+
+    def test_deeply_nested_subquery_unregistered_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query("SELECT * FROM (SELECT * FROM (SELECT * FROM secret_table))")
+
+    def test_nested_subquery_in_join_on_condition_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query("SELECT * FROM data d1 JOIN data d2 ON d1.id = (SELECT max(id) FROM secret_table)")
+
+    def test_scalar_subquery_in_select_list_unregistered_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query("SELECT (SELECT max(id) FROM secret_table) AS m FROM data")
+
+    def test_scalar_subquery_in_select_list_registered_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query("SELECT (SELECT max(id) FROM data) AS m FROM data")
+        assert result.row_count == 2
+        assert result.rows[0]["m"] == 2
+
+    def test_cte_with_unregistered_table_blocked(self, data_console: DuckDBConsole) -> None:
+        query = "WITH bad_cte AS (SELECT * FROM secret_table) SELECT * FROM bad_cte"
+        with pytest.raises(ValidationError, match="Access to table 'secret_table' is not allowed"):
+            data_console.execute_query(query)
+
+    def test_cte_with_comma_join_function_blocked(self, data_console: DuckDBConsole) -> None:
+        query = "WITH bad_cte AS (SELECT * FROM data, duckdb_functions()) SELECT * FROM bad_cte"
+        with pytest.raises(ValidationError, match="cannot be used as a table source"):
+            data_console.execute_query(query)
+
+    def test_quoted_cte_with_comma_join_invalid_table_blocked(self, data_console: DuckDBConsole) -> None:
+        query = 'WITH "bad_cte" AS (SELECT * FROM data, (SELECT 1), invalid_table) SELECT * FROM "bad_cte"'
+        with pytest.raises(ValidationError, match="Access to table 'invalid_table' is not allowed"):
+            data_console.execute_query(query)
+
+    def test_quoted_cte_valid_query_allowed(self, data_console: DuckDBConsole) -> None:
+        query = 'WITH "valid_cte" AS (SELECT id, val FROM data) SELECT * FROM "valid_cte"'
+        result = data_console.execute_query(query)
+        assert result.row_count == 2
+
+    def test_table_valued_functions_blocked(self, data_console: DuckDBConsole) -> None:
+        with pytest.raises(ValidationError, match="cannot be used as a table source"):
+            data_console.execute_query("SELECT * FROM range(10)")
+        with pytest.raises(ValidationError, match="cannot be used as a table source"):
+            data_console.execute_query("SELECT * FROM generate_series(1, 10)")
+
+    def test_extract_function_with_from_keyword_allowed(self, data_console: DuckDBConsole) -> None:
+        result = data_console.execute_query("SELECT EXTRACT(YEAR FROM CAST('2024-05-15' AS DATE)) AS yr FROM data")
+        assert result.row_count == 2
+        assert result.rows[0]["yr"] == 2024
