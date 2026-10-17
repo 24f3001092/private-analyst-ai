@@ -1,0 +1,25 @@
+# Caddyfile Reverse Proxy for Private Analyst AI (Server Edition)
+# Provides automatic HTTPS with Let's Encrypt or internal corporate CA.
+
+analyst.internal.domain {
+    # Reverse proxy to loopback Streamlit
+    reverse_proxy 127.0.0.1:8501 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-Port {server_port}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Request size limit (50 MB)
+    request_body {
+        max_size 50MB
+    }
+}

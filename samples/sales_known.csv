@@ -1,0 +1,6 @@
+date,region,product,units,revenue,status
+2024-01-01,East,Widget,10,100.0,ok
+2024-01-02,West,Widget,20,200.0,ok
+2024-01-03,East,Gadget,5,75.0,
+2024-01-04,West,Gadget,15,225.0,ok
+2024-01-05,East,Widget,0,0.0,cancelled

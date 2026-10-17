@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "private-analyst"
+version = "0.1.0"
+description = "Commercial-ready, offline-first private AI data analysis platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Commercial / Proprietary"}
+authors = [
+    {name = "Private Analyst AI Team"}
+]
+dependencies = [
+    "streamlit==1.64.0",
+    "pandas==2.3.3",
+    "numpy==2.5.2",
+    "openpyxl==3.1.5",
+    "plotly==7.1.0",
+    "PyPDF2==3.0.1",
+    "reportlab==5.0.1",
+    "bcrypt==5.0.0",
+    "scikit-learn==1.9.0",
+    "cryptography==50.0.0",
+    "pytest==9.1.1",
+    "python-dateutil==2.9.0.post0",
+    "duckdb==1.5.6",
+    "pypdf==6.20.1",
+    "pytesseract==0.3.13",
+    "pillow==12.3.0",
+]
+
+[project.scripts]
+private-analyst = "private_analyst.ui.streamlit_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
