@@ -218,3 +218,23 @@ def test_check_session_timeout_expired_session():
         assert mock_state["duckdb_console"] is None
         mock_warning.assert_called_once()
 
+
+def test_desktop_non_loopback_host_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Unauthenticated desktop edition must reject non-loopback bind hosts."""
+    monkeypatch.setenv("PRIVATE_ANALYST_EDITION", "desktop")
+    monkeypatch.setenv("PRIVATE_ANALYST_SERVER_HOST", "0.0.0.0")
+    monkeypatch.setenv("PRIVATE_ANALYST_DATA_DIR", str(tmp_path))
+    with pytest.raises(ValidationError, match="Non-loopback bind host.*not allowed in desktop mode"):
+        load_config()
+
+
+def test_server_edition_allows_external_bind_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Server edition (with forced require_auth=True) is permitted to bind to 0.0.0.0 for reverse proxies."""
+    monkeypatch.setenv("PRIVATE_ANALYST_EDITION", "server")
+    monkeypatch.setenv("PRIVATE_ANALYST_SERVER_HOST", "0.0.0.0")
+    monkeypatch.setenv("PRIVATE_ANALYST_DATA_DIR", str(tmp_path))
+    cfg = load_config()
+    assert cfg.server.edition == "server"
+    assert cfg.server.bind_host == "0.0.0.0"
+    assert cfg.server.require_auth is True
+

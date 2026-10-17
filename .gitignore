@@ -9,8 +9,8 @@ venv/
 .streamlit/secrets.toml
 *.sqlite3
 *.db
-data/
-reports/
-models/
-dist/
-build/
+/data/
+/reports/
+/models/
+/dist/
+/build/

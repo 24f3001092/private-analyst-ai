@@ -18,6 +18,26 @@ sys.path.insert(0, str(ROOT / "src"))
 from private_analyst.version import PRODUCT_NAME, __version__
 
 
+DIST_IGNORE_PATTERNS = (
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".git*",
+    ".env*",
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.key",
+    "master.key",
+    "*.log",
+    "*.tmp",
+    ".coverage",
+    ".venv",
+    "venv",
+)
+
+
 def run_tests() -> bool:
     print(f"\n[1/4] Running full automated test suite for {PRODUCT_NAME} v{__version__}...")
     env = os.environ.copy()
@@ -26,33 +46,45 @@ def run_tests() -> bool:
     return res.returncode == 0
 
 
-def build_distribution() -> Path:
-    dist_root = ROOT / "dist"
-    bundle_name = f"PrivateAnalystAI-v{__version__}"
+def build_distribution(
+    output_dir: Path | None = None,
+    archive_name: str | None = None,
+    include_tests: bool = True,
+) -> Path:
+    dist_root = Path(output_dir) if output_dir else (ROOT / "dist")
+    bundle_name = archive_name or f"PrivateAnalystAI-v{__version__}"
     bundle_dir = dist_root / bundle_name
 
-    print(f"\n[2/4] Cleaning previous builds and staging bundle at {bundle_dir}...")
-    if dist_root.exists():
-        shutil.rmtree(dist_root, ignore_errors=True)
+    print(f"\n[2/4] Staging distribution bundle at {bundle_dir}...")
+    dist_root.mkdir(parents=True, exist_ok=True)
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir, ignore_errors=True)
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    # Folders to copy
-    folders = ["src", "scripts", "deploy", "docs", "samples"]
+    # Required folders to copy
+    folders = ["src", "scripts", "deploy", "docs", "samples", ".streamlit"]
+    if include_tests:
+        folders.append("tests")
+
     for folder in folders:
         src = ROOT / folder
         if src.is_dir():
             shutil.copytree(
                 src,
                 bundle_dir / folder,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache"),
+                ignore=shutil.ignore_patterns(*DIST_IGNORE_PATTERNS),
             )
+        elif folder == ".streamlit":
+            raise FileNotFoundError(f"Required configuration directory '{src}' not found.")
 
-    # Root files to copy
+    # Required root files to copy
     files = ["app.py", "pyproject.toml", "requirements.txt", "README.md", "LICENSE", "pytest.ini"]
     for file in files:
         src = ROOT / file
         if src.is_file():
             shutil.copy2(src, bundle_dir / file)
+        else:
+            raise FileNotFoundError(f"Required release file '{src}' not found.")
 
     print(f"\n[3/4] Creating distribution zip archive...")
     archive_base = dist_root / f"{bundle_name}-windows-offline"

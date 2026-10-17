@@ -164,6 +164,13 @@ def load_config(path: Path | None = None) -> AppConfig:
     # It cannot be disabled by config file or environment.
     if cfg.server.edition == "server":
         cfg.server.require_auth = True
+    elif not cfg.server.require_auth:
+        # In desktop mode without authentication, bind_host MUST be loopback only
+        if cfg.server.bind_host.strip().lower() not in ALLOWED_LOOPBACK_HOSTS:
+            raise ValidationError(
+                f"Non-loopback bind host '{cfg.server.bind_host}' is not allowed in desktop mode without authentication. "
+                "Switch to server mode or enable require_auth."
+            )
 
     # Telemetry and external AI network access are permanently disabled
     cfg.telemetry_enabled = False
