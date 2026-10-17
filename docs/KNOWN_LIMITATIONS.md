@@ -4,7 +4,7 @@ Be honest with customers. Version **0.1.0** is an enterprise-grade private MVP d
 
 ---
 
-## 1. Implemented in Current Build (241 Automated Tests Passing)
+## 1. Implemented in Current Build (243 Automated Tests Passing)
 
 - **Hardened DuckDB Analytical Sandbox**: Kernel-level external access disabling (`enable_external_access=False`), configuration lock (`lock_configuration=True`), and conservative AST/token query validation restricting queries to registered in-memory tables and declared CTEs.
 - **Strict Server Authentication Invariant**: Fail-closed configuration precedence unconditionally forcing `require_auth=True` in server mode, blocking desktop bypass, and integrating session token management with idle timeouts.
