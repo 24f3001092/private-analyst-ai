@@ -70,8 +70,8 @@ def test_build_distribution_excludes_sensitive_files(tmp_path: Path) -> None:
         # Must not contain environment files or secrets
         assert not any(".env" in n for n in names)
 
-        # Must not contain SQLite databases or key stores
-        assert not any(n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".sqlite3") for n in names)
+        # Must not contain SQLite databases, DuckDB databases, or key stores
+        assert not any(n.endswith(".db") or n.endswith(".sqlite") or n.endswith(".sqlite3") or n.endswith(".duckdb") for n in names)
         assert not any(n.endswith(".key") or "master.key" in n for n in names)
 
         # Must not contain bytecode caches or test caches

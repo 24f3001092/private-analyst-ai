@@ -20,7 +20,8 @@ def analysis_metadata(source_name: str) -> dict:
     }
 
 
-DANGEROUS_FORMULA_PREFIXES = ("=", "@", "\t", "\r")
+DANGEROUS_FORMULA_PREFIXES = ("=", "@")
+DANGEROUS_CONTROL_PREFIXES = ("\t", "\r")
 
 
 def sanitize_csv_value(val: object) -> object:
@@ -31,6 +32,11 @@ def sanitize_csv_value(val: object) -> object:
     """
     if not isinstance(val, str):
         return val
+    if not val:
+        return val
+    space_trimmed = val.lstrip(" ")
+    if space_trimmed and space_trimmed[0] in DANGEROUS_CONTROL_PREFIXES:
+        return f"'{val}"
     stripped = val.lstrip()
     if not stripped:
         return val
@@ -50,10 +56,10 @@ def sanitize_dataframe_for_csv(frame: pd.DataFrame) -> pd.DataFrame:
     """Return a sanitized copy of the DataFrame safe for CSV export."""
     clean = frame.copy()
     clean.columns = [sanitize_csv_value(col) if isinstance(col, str) else col for col in clean.columns]
-    for col in clean.columns:
-        series = clean[col]
-        if series.dtype == object or isinstance(series.dtype, pd.StringDtype):
-            clean[col] = series.map(lambda v: sanitize_csv_value(v) if isinstance(v, str) else v)
+    for i in range(clean.shape[1]):
+        series = clean.iloc[:, i]
+        if series.dtype == object or pd.api.types.is_string_dtype(series):
+            clean.isetitem(i, series.map(lambda v: sanitize_csv_value(v) if isinstance(v, str) else v))
     return clean
 
 

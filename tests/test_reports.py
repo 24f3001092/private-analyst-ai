@@ -137,3 +137,48 @@ def test_csv_export_mitigates_formula_injection_in_headers_and_cells() -> None:
     # Valid number +300 must NOT be escaped
     assert "+300" in csv_text
     assert "'+300" not in csv_text
+
+
+def test_csv_formula_injection_control_characters_and_whitespace() -> None:
+    """Verify control characters, whitespace-prefixed formulas, and standalone symbols are handled."""
+    # Control character prefixes (tab, carriage return)
+    assert sanitize_csv_value("\tcalc") == "'\tcalc"
+    assert sanitize_csv_value("  \tcalc") == "'  \tcalc"
+    assert sanitize_csv_value("\rcalc") == "'\rcalc"
+    assert sanitize_csv_value("\t") == "'\t"
+    assert sanitize_csv_value("\r") == "'\r"
+
+    # Multiline / newline-prefixed formulas
+    assert sanitize_csv_value("\n=1+1") == "'\n=1+1"
+    assert sanitize_csv_value("\r\n=1+1") == "'\r\n=1+1"
+    assert sanitize_csv_value("\n-cmd") == "'\n-cmd"
+    assert sanitize_csv_value(" \t=cmd") == "' \t=cmd"
+
+    # Standalone formula trigger symbols (non-numeric)
+    assert sanitize_csv_value("-") == "'-"
+    assert sanitize_csv_value("+") == "'+"
+    assert sanitize_csv_value("--") == "'--"
+
+    # Legitimate numbers with leading whitespace or scientific notation
+    assert sanitize_csv_value("  -42") == "  -42"
+    assert sanitize_csv_value("  +42") == "  +42"
+    assert sanitize_csv_value("-1e-4") == "-1e-4"
+    assert sanitize_csv_value("+2.5e3") == "+2.5e3"
+
+
+def test_csv_formula_injection_categorical_and_duplicate_columns() -> None:
+    """Verify categorical string series and duplicate column DataFrames sanitize cleanly."""
+    cat_series = pd.Series(["=formula_cat", "safe_cat", "-cmd"], dtype="category")
+    df = pd.DataFrame({"cat_col": cat_series})
+    clean = sanitize_dataframe_for_csv(df)
+    csv_text = to_csv_bytes(clean).decode("utf-8")
+    assert "'=formula_cat" in csv_text
+    assert "'-cmd" in csv_text
+    assert "safe_cat" in csv_text
+
+    # Duplicate column names must not cause AttributeError or crash
+    dup_df = pd.DataFrame([["=danger1", "=danger2"]], columns=["dup", "dup"])
+    dup_clean = sanitize_dataframe_for_csv(dup_df)
+    dup_csv = to_csv_bytes(dup_clean).decode("utf-8")
+    assert "'=danger1" in dup_csv
+    assert "'=danger2" in dup_csv
