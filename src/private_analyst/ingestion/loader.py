@@ -23,6 +23,24 @@ class WorkbookInfo:
 
 
 @dataclass
+class CleaningOperation:
+    step: str
+    description: str
+    impact: str
+    affected_columns: list[str] = field(default_factory=list)
+    rows_affected: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "description": self.description,
+            "impact": self.impact,
+            "affected_columns": self.affected_columns,
+            "rows_affected": self.rows_affected,
+        }
+
+
+@dataclass
 class IngestResult:
     frame: pd.DataFrame
     source_name: str
@@ -40,6 +58,15 @@ class IngestResult:
     cleaned_shape: tuple[int, int] = (0, 0)
     excluded_rows: int = 0
     original_column_names: dict[str, str] = field(default_factory=dict)
+    cleaning_log: list[CleaningOperation] = field(default_factory=list)
+    unnamed_columns: list[str] = field(default_factory=list)
+    semantic_types: dict[str, str] = field(default_factory=dict)
+    raw_preview: list[dict[str, Any]] = field(default_factory=list)
+    raw_frame: pd.DataFrame | None = None
+
+    @property
+    def cleaning_operations(self) -> list[dict[str, Any]]:
+        return [op.to_dict() for op in self.cleaning_log]
 
 
 def inspect_workbook(data: bytes, filename: str) -> WorkbookInfo | None:
@@ -169,6 +196,234 @@ def _infer_types(frame: pd.DataFrame) -> dict[str, str]:
     return out
 
 
+def parse_currency(val: Any) -> tuple[float | None, str | None]:
+    """Parse a currency string into a numeric float amount and symbol/code."""
+    if val is None or pd.isna(val):
+        return None, None
+    s = str(val).strip()
+    if not s:
+        return None, None
+    curr_match = re.search(r"([₹\$€£¥]|INR|USD|EUR|GBP|JPY)", s, re.IGNORECASE)
+    symbol = curr_match.group(1).upper() if curr_match else None
+    cleaned = re.sub(r"[₹\$€£¥,]|INR|USD|EUR|GBP|JPY", "", s, flags=re.IGNORECASE).strip()
+    # Check for range: e.g. "500 - 1000"
+    if "-" in cleaned or " to " in cleaned.lower():
+        parts = re.split(r"-|\bto\b", cleaned, flags=re.IGNORECASE)
+        try:
+            return float(parts[0].strip()), symbol
+        except (ValueError, IndexError):
+            pass
+    mult = 1.0
+    s_lower = cleaned.lower()
+    if s_lower.endswith("k"):
+        mult = 1_000.0
+        cleaned = cleaned[:-1].strip()
+    elif "lakh" in s_lower or "lac" in s_lower:
+        mult = 100_000.0
+        cleaned = re.sub(r"lakh|lac", "", cleaned, flags=re.IGNORECASE).strip()
+    elif "cr" in s_lower or "crore" in s_lower:
+        mult = 10_000_000.0
+        cleaned = re.sub(r"cr|crore", "", cleaned, flags=re.IGNORECASE).strip()
+    elif s_lower.endswith("m"):
+        mult = 1_000_000.0
+        cleaned = cleaned[:-1].strip()
+    try:
+        return float(cleaned) * mult, symbol
+    except ValueError:
+        return None, symbol
+
+
+def parse_percentage(val: Any) -> float | None:
+    """Parse percentage string into a float value (e.g. '12.5%' -> 12.5, '(5%)' -> -5.0)."""
+    if val is None or pd.isna(val):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    negative = False
+    if s.startswith("(") and s.endswith(")"):
+        negative = True
+        s = s[1:-1].strip()
+    elif s.startswith("-"):
+        negative = True
+        s = s[1:].strip()
+    is_pct_sign = False
+    if s.endswith("%"):
+        is_pct_sign = True
+        s = s[:-1].strip()
+    try:
+        val_f = float(s.replace(",", ""))
+        if not is_pct_sign and 0.0 < abs(val_f) <= 1.0:
+            val_f = val_f * 100.0
+        return -val_f if negative else val_f
+    except ValueError:
+        return None
+
+
+def parse_numeric_range(val: Any) -> tuple[float | None, float | None, float | None]:
+    """Parse a range string like '5,000 - 10,000', '10 to 20', or '50' into (min, max, mid)."""
+    if val is None or pd.isna(val):
+        return None, None, None
+    s = str(val).strip()
+    if not s:
+        return None, None, None
+    parts = re.split(r"\s*-\s*|\s+to\s+", s, flags=re.IGNORECASE)
+    if len(parts) == 2:
+        p1, _ = parse_currency(parts[0])
+        p2, _ = parse_currency(parts[1])
+        if p1 is not None and p2 is not None:
+            low, high = min(p1, p2), max(p1, p2)
+            return low, high, (low + high) / 2.0
+    elif len(parts) == 1:
+        p, _ = parse_currency(parts[0])
+        if p is not None:
+            return p, p, p
+    return None, None, None
+
+
+def _infer_semantic_types(frame: pd.DataFrame, base_types: dict[str, str]) -> dict[str, str]:
+    """Infer rich semantic types (percentage, categorical, numeric_range, etc.)."""
+    out: dict[str, str] = {}
+    for col in frame.columns:
+        b_type = base_types.get(str(col), "text")
+        if b_type in ("integer", "float", "numeric_string"):
+            out[str(col)] = "numeric"
+        elif b_type in ("datetime", "datetime_string"):
+            out[str(col)] = "datetime"
+        elif b_type in ("currency", "url", "boolean", "empty"):
+            out[str(col)] = b_type
+        else:
+            series = frame[col].dropna()
+            if series.empty:
+                out[str(col)] = "empty"
+                continue
+            str_series = series.astype(str).str.strip()
+            # Percentage detection
+            pct_matches = str_series.str.endswith("%").sum()
+            if len(str_series) > 0 and pct_matches >= max(1, int(0.7 * len(str_series))):
+                out[str(col)] = "percentage"
+                continue
+            # Numeric range detection
+            range_matches = str_series.str.contains(r"^\s*[\$₹€£]?\s*\d+[\d,]*\s*(?:-|to)\s*[\$₹€£]?\s*\d+[\d,]*", regex=True, case=False).sum()
+            if len(str_series) > 0 and range_matches >= max(1, int(0.6 * len(str_series))):
+                out[str(col)] = "numeric_range"
+                continue
+            # Categorical detection: low unique values
+            uniq = series.nunique()
+            if 1 <= uniq <= 30 and len(str_series) >= uniq:
+                out[str(col)] = "categorical"
+                continue
+            out[str(col)] = "text"
+    return out
+
+
+def repair_unnamed_columns(
+    frame: pd.DataFrame,
+    custom_names: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, str], CleaningOperation | None]:
+    """Detect and rename columns named 'Unnamed: X' or 'unnamed_column', with user override support."""
+    custom = custom_names or {}
+    new_cols = []
+    renamed: dict[str, str] = {}
+    for idx, col in enumerate(frame.columns):
+        col_str = str(col).strip()
+        is_unnamed = col_str.startswith("Unnamed:") or col_str.startswith("unnamed_column")
+        if is_unnamed:
+            if col_str in custom and custom[col_str].strip():
+                new_name = custom[col_str].strip()
+            else:
+                new_name = f"Column_{idx + 1}"
+            renamed[col_str] = new_name
+            new_cols.append(new_name)
+        else:
+            new_cols.append(col_str)
+
+    if not renamed:
+        return frame, {}, None
+
+    updated = frame.copy()
+    updated.columns = new_cols
+    op = CleaningOperation(
+        step="repair_unnamed_headers",
+        description=f"Repaired {len(renamed)} unnamed header(s) with descriptive names",
+        impact="Neutralized unnamed column artifacts from spreadsheet layout",
+        affected_columns=list(renamed.values()),
+        rows_affected=0,
+    )
+    return updated, renamed, op
+
+
+def apply_transformations(
+    frame: pd.DataFrame,
+    exclude_cols: list[str] | None = None,
+    exclude_row_indices: list[int] | None = None,
+    rename_cols: dict[str, str] | None = None,
+    header_row: int | None = None,
+    exclude_columns: list[str] | None = None,
+    rename_columns: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, list[CleaningOperation]]:
+    """Apply interactive user adjustments: header override, column exclusion, row exclusion, and column renames."""
+    updated = frame.copy()
+    ops: list[CleaningOperation] = []
+
+    if header_row is not None and isinstance(header_row, int) and 0 <= header_row < len(updated):
+        new_headers = [str(x).strip() for x in updated.iloc[header_row]]
+        updated = updated.iloc[header_row + 1:].copy().reset_index(drop=True)
+        updated.columns = new_headers
+        ops.append(
+            CleaningOperation(
+                step="override_header_row",
+                description=f"Promoted row {header_row + 1} to column headers",
+                impact=f"Reindexed table with row {header_row + 1} headers",
+                rows_affected=header_row + 1,
+            )
+        )
+
+    effective_exclude = exclude_cols or exclude_columns
+    effective_rename = rename_cols or rename_columns
+
+    if effective_exclude:
+        valid_cols = [c for c in effective_exclude if c in updated.columns]
+        if valid_cols:
+            updated = updated.drop(columns=valid_cols)
+            ops.append(
+                CleaningOperation(
+                    step="exclude_columns",
+                    description=f"Excluded {len(valid_cols)} irrelevant or sensitive column(s)",
+                    impact=f"Dropped columns: {', '.join(valid_cols)}",
+                    affected_columns=valid_cols,
+                )
+            )
+
+    if exclude_row_indices:
+        valid_indices = [idx for idx in exclude_row_indices if idx in updated.index]
+        if valid_indices:
+            updated = updated.drop(index=valid_indices)
+            ops.append(
+                CleaningOperation(
+                    step="exclude_rows",
+                    description=f"Excluded {len(valid_indices)} irrelevant row(s)",
+                    impact=f"Reduced row count from {len(frame)} to {len(updated)}",
+                    rows_affected=len(valid_indices),
+                )
+            )
+
+    if effective_rename:
+        valid_renames = {k: v for k, v in effective_rename.items() if k in updated.columns and v.strip()}
+        if valid_renames:
+            updated = updated.rename(columns=valid_renames)
+            ops.append(
+                CleaningOperation(
+                    step="rename_columns",
+                    description=f"Renamed {len(valid_renames)} column(s)",
+                    impact=f"Custom headers applied: {list(valid_renames.values())}",
+                    affected_columns=list(valid_renames.values()),
+                )
+            )
+
+    return updated, ops
+
+
 def _normalize_columns(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str], dict[str, str]]:
     """Clean column names, deduplicate uniquely, and retain an original mapping."""
     seen: dict[str, int] = {}
@@ -216,6 +471,7 @@ def load_tabular(
     available_sheets: list[str] = []
     selected_sheet = sheet_name
     detected_title = None
+    cleaning_log: list[CleaningOperation] = []
 
     try:
         if suffix == ".csv":
@@ -227,6 +483,7 @@ def load_tabular(
                     h_idx = header_row
             except Exception:
                 h_idx = 0
+                df_raw = None
             frame = pd.read_csv(io.BytesIO(data), header=h_idx, on_bad_lines="error", engine="python")
             raw_shape = (len(frame) + h_idx + 1, frame.shape[1])
         else:
@@ -258,14 +515,57 @@ def load_tabular(
     if frame.shape[1] > limits.max_columns:
         raise ResourceLimitError(f"Column count exceeds the configured limit ({limits.max_columns}).")
 
+    if h_idx > 0:
+        cleaning_log.append(
+            CleaningOperation(
+                step="header_selection",
+                description=f"Selected row {h_idx + 1} (0-indexed {h_idx}) as table header row",
+                impact=f"Skipped {h_idx} leading non-tabular or introductory rows",
+                rows_affected=h_idx,
+            )
+        )
+
+    if detected_title:
+        cleaning_log.append(
+            CleaningOperation(
+                step="title_banner_separation",
+                description=f"Detected and separated title banner: '{detected_title}'",
+                impact="Preserved title context while excluding banner from table records",
+                rows_affected=1,
+            )
+        )
+
     # Clean whitespace and drop completely blank rows
+    init_rows = len(frame)
     frame = frame.dropna(how="all").copy()
+    empty_dropped = init_rows - len(frame)
+    if empty_dropped > 0:
+        cleaning_log.append(
+            CleaningOperation(
+                step="drop_empty_rows",
+                description=f"Dropped {empty_dropped} completely blank row(s)",
+                impact="Eliminated empty spreadsheet rows from records",
+                rows_affected=empty_dropped,
+            )
+        )
 
     # Strip string columns of leading/trailing spaces and convert empty strings to NA
+    text_cols_stripped = []
     for col in frame.columns:
         if frame[col].dtype == object or isinstance(frame[col].dtype, pd.StringDtype):
             frame[col] = frame[col].map(lambda v: v.strip() if isinstance(v, str) else v)
             frame[col] = frame[col].replace("", np.nan)
+            text_cols_stripped.append(str(col))
+
+    if text_cols_stripped:
+        cleaning_log.append(
+            CleaningOperation(
+                step="strip_whitespace",
+                description=f"Trimmed whitespace and converted empty strings to NA in {len(text_cols_stripped)} text column(s)",
+                impact="Standardized string fields and ensured missing value consistency",
+                affected_columns=text_cols_stripped,
+            )
+        )
 
     frame = frame.dropna(how="all")
 
@@ -275,6 +575,29 @@ def load_tabular(
     frame, duplicates, orig_map = _normalize_columns(frame)
     if duplicates:
         warnings.append("Duplicate column names were renamed to keep them unique.")
+        cleaning_log.append(
+            CleaningOperation(
+                step="deduplicate_columns",
+                description=f"Renamed {len(duplicates)} duplicate column header(s)",
+                impact=f"Appended unique suffixes to maintain distinct indexing: {duplicates}",
+                affected_columns=duplicates,
+            )
+        )
+
+    unnamed_cols = [
+        str(c)
+        for c in frame.columns
+        if str(c).startswith("Unnamed:") or str(c) == "unnamed_column" or str(c).startswith("unnamed_column__")
+    ]
+    if unnamed_cols:
+        cleaning_log.append(
+            CleaningOperation(
+                step="detect_unnamed_headers",
+                description=f"Detected {len(unnamed_cols)} unnamed column header(s)",
+                impact="Flagged for user review and repair",
+                affected_columns=unnamed_cols,
+            )
+        )
 
     if detected_title:
         warnings.append(f"Detected and separated title row: '{detected_title}'")
@@ -286,7 +609,9 @@ def load_tabular(
         warnings.append(f"Column '{first_col}' identified as row index / sequence number.")
 
     inferred = _infer_types(frame)
+    sem_types = _infer_semantic_types(frame, inferred)
     excluded_rows = max(0, raw_shape[0] - frame.shape[0])
+    raw_prev = preview(df_raw, 10) if df_raw is not None else []
 
     return IngestResult(
         frame=frame,
@@ -305,6 +630,11 @@ def load_tabular(
         cleaned_shape=frame.shape,
         excluded_rows=excluded_rows,
         original_column_names=orig_map,
+        cleaning_log=cleaning_log,
+        unnamed_columns=unnamed_cols,
+        semantic_types=sem_types,
+        raw_preview=raw_prev,
+        raw_frame=df_raw,
     )
 
 

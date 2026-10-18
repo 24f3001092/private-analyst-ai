@@ -11,12 +11,19 @@ import streamlit as st
 
 from private_analyst.ai.client import check_local_model
 from private_analyst.ai.explainer import explain_results
-from private_analyst.analytics.anomalies import detect_iqr_anomalies, linear_trend_forecast
+from private_analyst.analytics.anomalies import detect_iqr_anomalies, detect_zscore_anomalies, linear_trend_forecast
 from private_analyst.analytics.ml_engine import run_classification, run_clustering, run_regression
 from private_analyst.analytics.operations import run_operation
 from private_analyst.analytics.quality import assess_quality
 from private_analyst.analytics.sql_console import DuckDBConsole
-from private_analyst.analytics.statistics import compute_dataset_stats, frequency_analysis, group_compare
+from private_analyst.analytics.statistics import (
+    compute_correlation_matrix,
+    compute_dataset_stats,
+    compute_time_trends,
+    frequency_analysis,
+    group_compare,
+    recommend_charts,
+)
 from private_analyst.auth.rbac import can
 from private_analyst.auth.users import User, UserStore
 from private_analyst.config import load_config
@@ -24,13 +31,35 @@ from private_analyst.documents.index import LocalTextIndex
 from private_analyst.documents.ocr import ocr_image
 from private_analyst.documents.pdf import extract_pdf_text
 from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError
-from private_analyst.ingestion.loader import IngestResult, WorkbookInfo, inspect_workbook, load_tabular
-from private_analyst.reports.exporters import analysis_metadata, report_markdown, to_csv_bytes, to_excel_bytes
+from private_analyst.ingestion.loader import (
+    IngestResult,
+    WorkbookInfo,
+    apply_transformations,
+    inspect_workbook,
+    load_tabular,
+    repair_unnamed_columns,
+)
+from private_analyst.reports.exporters import (
+    analysis_metadata,
+    report_markdown,
+    to_csv_bytes,
+    to_excel_bytes,
+    to_report_excel_bytes,
+)
 from private_analyst.reports.pdf_report import to_pdf_bytes
 from private_analyst.security.encryption import SecureKeyStore
 from private_analyst.security.sessions import SessionManager
 from private_analyst.version import PRODUCT_NAME, __version__
-from private_analyst.viz.charts import bar_sum, category_bar, crosstab_heatmap, histogram, missingness
+from private_analyst.viz.charts import (
+    bar_sum,
+    category_bar,
+    correlation_heatmap,
+    crosstab_heatmap,
+    histogram,
+    missingness,
+    outlier_box,
+    time_series_line,
+)
 from private_analyst.audit.logger import AuditLog
 
 logger = logging.getLogger(__name__)
@@ -308,22 +337,113 @@ def _import_tab(cfg, user: User) -> None:
     except Exception:
         pass
 
-    st.subheader("Data Preview")
-    st.dataframe(ingest.frame.head(cfg.limits.preview_rows), use_container_width=True)
+    tabs_list = None
+    try:
+        t_res = st.tabs(["Cleaned Table", "Raw Data Preview", "Cleaning Ledger"])
+        if isinstance(t_res, (list, tuple)) and len(t_res) == 3:
+            tabs_list = t_res
+    except Exception:
+        tabs_list = None
 
-    with st.expander("Detected Column Types & Schema Details"):
-        type_rows = []
-        for col_name, inferred_type in ingest.inferred_types.items():
-            non_null_cnt = int(ingest.frame[col_name].notna().sum())
-            null_cnt = int(ingest.frame[col_name].isna().sum())
-            type_rows.append({
-                "Column Name": col_name,
-                "Detected Type": inferred_type,
-                "Non-Null Count": non_null_cnt,
-                "Missing Count": null_cnt,
-                "Completeness": f"{(non_null_cnt / len(ingest.frame) * 100):.1f}%" if len(ingest.frame) > 0 else "0.0%",
-            })
-        st.dataframe(pd.DataFrame(type_rows), use_container_width=True)
+    if tabs_list is not None:
+        tab_clean, tab_raw, tab_ledger = tabs_list
+        with tab_clean:
+            st.subheader("Cleaned & Structured Data")
+            st.dataframe(ingest.frame.head(cfg.limits.preview_rows), use_container_width=True)
+
+            with st.expander("Detected Column Types & Schema Intelligence", expanded=False):
+                type_rows = []
+                sem_types = getattr(ingest, "semantic_types", {})
+                for col_name, inferred_type in ingest.inferred_types.items():
+                    non_null_cnt = int(ingest.frame[col_name].notna().sum())
+                    null_cnt = int(ingest.frame[col_name].isna().sum())
+                    s_type = sem_types.get(col_name, inferred_type)
+                    type_rows.append({
+                        "Column Name": col_name,
+                        "Inferred Type": inferred_type,
+                        "Semantic Type": s_type.title() if s_type else "-",
+                        "Non-Null Count": non_null_cnt,
+                        "Missing Count": null_cnt,
+                        "Completeness": f"{(non_null_cnt / len(ingest.frame) * 100):.1f}%" if len(ingest.frame) > 0 else "0.0%",
+                    })
+                st.dataframe(pd.DataFrame(type_rows), use_container_width=True)
+
+        with tab_raw:
+            st.subheader("Raw File Extract")
+            st.caption("Unaltered spreadsheet content before header identification or row exclusions.")
+            if ingest.raw_frame is not None:
+                st.dataframe(ingest.raw_frame.head(cfg.limits.preview_rows), use_container_width=True)
+            else:
+                st.info("Raw spreadsheet buffer view is only available for direct file imports.")
+
+        with tab_ledger:
+            st.subheader("Data Cleaning Ledger & Audit Trail")
+            st.caption("Verifiable record of every automated normalization and filtering step performed on ingestion.")
+            ops = getattr(ingest, "cleaning_operations", [])
+            if ops:
+                ledger_rows = [
+                    {
+                        "Step": op.step.replace("_", " ").title(),
+                        "Description": op.description,
+                        "Impact": op.impact,
+                        "Rows Affected": op.rows_affected,
+                        "Affected Columns": ", ".join(op.affected_columns) if op.affected_columns else "All",
+                        "Timestamp": op.timestamp[:19].replace("T", " ") if hasattr(op, "timestamp") else "-",
+                    }
+                    for op in ops
+                ]
+                st.dataframe(pd.DataFrame(ledger_rows), use_container_width=True)
+            else:
+                st.success("No automated cleaning operations were required. The input dataset was already clean and tabular.")
+    else:
+        st.subheader("Cleaned & Structured Data")
+        st.dataframe(ingest.frame.head(cfg.limits.preview_rows), use_container_width=True)
+
+    with st.expander("Interactive Data Preparation & Column Repairs", expanded=bool(getattr(ingest, "unnamed_columns", []))):
+        st.write("Modify headers, exclude columns, or repair unnamed headers interactively:")
+        try:
+            c_prep = st.columns(2)
+            if isinstance(c_prep, (list, tuple)) and len(c_prep) == 2:
+                col_prep1, col_prep2 = c_prep[0], c_prep[1]
+            else:
+                col_prep1, col_prep2 = st, st
+        except Exception:
+            col_prep1, col_prep2 = st, st
+
+        with col_prep1:
+            unnamed_list = getattr(ingest, "unnamed_columns", [])
+            if unnamed_list:
+                st.warning(f"Detected {len(unnamed_list)} unnamed column(s): {', '.join(unnamed_list)}")
+                if st.button("Auto-Repair Unnamed Headers"):
+                    repaired_frame, renamed, op = repair_unnamed_columns(ingest.frame)
+                    if op:
+                        ingest.cleaning_operations.append(op)
+                    ingest.frame = repaired_frame
+                    ingest.unnamed_columns = []
+                    st.session_state.ingest = ingest
+                    st.success(f"Repaired {len(renamed)} column(s): {renamed}")
+                    st.rerun()
+            else:
+                st.success("All column headers are properly named.")
+        with col_prep2:
+            override_header = st.number_input(
+                "Override Header Row (0-indexed)",
+                min_value=0,
+                max_value=max(0, len(ingest.frame) - 1),
+                value=ingest.header_row,
+                step=1,
+            )
+            if isinstance(override_header, int) and override_header != ingest.header_row and st.button("Apply Header Override"):
+                transformed_frame, new_ops = apply_transformations(
+                    ingest.raw_frame if ingest.raw_frame is not None else ingest.frame,
+                    header_row=override_header,
+                )
+                ingest.frame = transformed_frame
+                ingest.header_row = override_header
+                ingest.cleaning_operations.extend(new_ops)
+                st.session_state.ingest = ingest
+                st.success(f"Applied header override to row {override_header + 1}.")
+                st.rerun()
 
 
 def _dashboard_tab() -> None:
@@ -412,6 +532,36 @@ def _dashboard_tab() -> None:
         top_cat_name = cat_cols_stats[0].name
         st.plotly_chart(category_bar(ingest.frame, top_cat_name), use_container_width=True)
 
+    recs = recommend_charts(ingest.frame, stats)
+    if recs:
+        st.subheader("Automated Chart Recommendations")
+        st.caption("Heuristically selected visualizations tailored to your dataset schema and cardinality.")
+        r_cols = st.columns(min(len(recs), 3))
+        for idx, rec in enumerate(recs[:3]):
+            with r_cols[idx]:
+                st.markdown(f"**{rec['title']}**")
+                st.caption(rec['description'])
+                rtype = rec.get("type")
+                if rtype == "category_bar" and rec.get("column") in ingest.frame.columns:
+                    st.plotly_chart(category_bar(ingest.frame, rec["column"]), use_container_width=True)
+                elif rtype == "histogram" and rec.get("column") in ingest.frame.columns:
+                    st.plotly_chart(histogram(ingest.frame, rec["column"]), use_container_width=True)
+                elif rtype == "correlation_heatmap":
+                    c_res = compute_correlation_matrix(ingest.frame)
+                    if c_res.get("status") == "ok":
+                        st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), use_container_width=True)
+
+    if len(stats.numeric_column_names) >= 2:
+        st.subheader("Correlation Matrix & Pairwise Association")
+        st.caption("Pearson correlation coefficients across numeric features.")
+        c_res = compute_correlation_matrix(ingest.frame)
+        if c_res.get("status") == "ok":
+            corr_df = pd.DataFrame(c_res["matrix"])
+            st.plotly_chart(correlation_heatmap(corr_df), use_container_width=True)
+            if c_res.get("top_correlations"):
+                with st.expander("Ranked Correlation Pairs", expanded=False):
+                    st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+
 
 def _ask_tab(cfg, user: User) -> None:
     ingest: IngestResult | None = st.session_state.ingest
@@ -498,10 +648,17 @@ def _ask_tab(cfg, user: User) -> None:
         elif chart_type == "crosstab_heatmap" and "crosstab" in result.calculated:
             ct_df = pd.DataFrame(result.calculated["crosstab"])
             st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), use_container_width=True)
+        elif chart_type == "correlation_heatmap" and "matrix" in result.calculated:
+            st.plotly_chart(correlation_heatmap(pd.DataFrame(result.calculated["matrix"])), use_container_width=True)
+        elif chart_type == "time_series_line" and "trend_table" in result.calculated:
+            st.plotly_chart(time_series_line(pd.DataFrame(result.calculated["trend_table"]), "period", "total", f"Time Trend for '{spec.get('date_col')}'"), use_container_width=True)
         elif chart_type == "bar" and spec.get("x") in ingest.frame.columns and spec.get("y") in ingest.frame.columns:
             st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), use_container_width=True)
 
-    with st.expander("View Raw Evidence Data (JSON)", expanded=False):
+    with st.container():
+        st.markdown(f"**Intent:** `{result.intent.title()}` | **Engine Status:** `{result.status.upper()}`")
+
+    with st.expander("Developer Diagnostics (Raw Engine Evidence)", expanded=False):
         st.write("**Observed (from file):**")
         st.json(result.observed)
         st.write("**Calculated (Python engine):**")
@@ -620,11 +777,27 @@ def _render_ml_result(result) -> None:
         st.error("Error: " + " ".join(result.caveats))
         return
 
-    st.write("### Evaluated Metrics")
-    st.json(result.metrics)
+    st.write("### Evaluated Model Metrics")
+    m = result.metrics
+    if "test_accuracy" in m and "train_accuracy" in m:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Holdout Test Accuracy", f"{m['test_accuracy'] * 100:.1f}%")
+        c2.metric("Training Accuracy", f"{m['train_accuracy'] * 100:.1f}%")
+        gap = (m['train_accuracy'] - m['test_accuracy']) * 100
+        c3.metric("Generalization Gap", f"{gap:.1f}%", delta=f"{'-Overfitting risk' if gap > 15 else 'Good generalization'}")
+    elif "test_r2" in m and "train_r2" in m:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Holdout Test R²", f"{m['test_r2']:.3f}")
+        c2.metric("Training R²", f"{m['train_r2']:.3f}")
+        c3.metric("Test RMSE", f"{m.get('test_rmse', 0):.2f}")
+        c4.metric("Train RMSE", f"{m.get('train_rmse', 0):.2f}")
+    else:
+        metric_cols = st.columns(min(max(len(m), 1), 4))
+        for idx, (k, v) in enumerate(m.items()):
+            metric_cols[idx % len(metric_cols)].metric(k.replace("_", " ").title(), f"{v:.4f}" if isinstance(v, float) else str(v))
 
-    st.write("### Model Parameters")
-    st.json(result.parameters)
+    with st.expander("Model Parameters & Diagnostic Details", expanded=False):
+        st.json(result.parameters)
 
     st.write("### Methodological Caveats & Hypotheses")
     for caveat in result.caveats:
@@ -657,10 +830,12 @@ def _ml_tab(cfg, user: User) -> None:
         "Categorical Breakdown & Frequencies",
         "Cross-Tabulation & Association Matrix",
         "Entity Diversity & Concentration Metrics",
+        "Correlation Matrix & Association Pairs",
+        "Time-Series Aggregations & Trends",
         "Classification (Decision Tree)",
         "Linear Regression",
         "Clustering (K-Means)",
-        "Anomaly Detection (IQR Outliers)",
+        "Anomaly Detection (IQR & Z-Score)",
         "Linear Trend Forecasting",
     ]
     default_task_idx = 0 if not numeric_cols else 3
@@ -791,14 +966,71 @@ def _ml_tab(cfg, user: User) -> None:
             f"Analyzed {len(diversity_rows)} categorical dimensions",
         )
 
+    elif task == "Correlation Matrix & Association Pairs":
+        st.subheader("Correlation Matrix & Association Analysis")
+        st.caption("Compute pairwise Pearson correlation coefficients between numeric variables.")
+        if len(numeric_cols) < 2:
+            st.warning("Correlation analysis requires at least two numeric features.")
+            return
+        if st.button("Compute Correlation Matrix", type="primary"):
+            c_res = compute_correlation_matrix(frame)
+            if c_res.get("status") == "ok":
+                corr_df = pd.DataFrame(c_res["matrix"])
+                st.plotly_chart(correlation_heatmap(corr_df), use_container_width=True)
+                if c_res.get("top_correlations"):
+                    st.write("### Top Associated Variable Pairs")
+                    st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "ml_correlation_matrix",
+                    f"Features: {len(numeric_cols)}, Pairs: {len(c_res.get('top_correlations', []))}",
+                )
+            else:
+                st.warning(c_res.get("caveat", "Insufficient variance to compute correlation."))
+
+    elif task == "Time-Series Aggregations & Trends":
+        st.subheader("Time-Series Trends & Aggregations")
+        st.caption("Analyze metric progression over daily, monthly, or yearly intervals.")
+        date_candidates = [
+            c for c in all_cols
+            if "date" in c.lower() or "time" in c.lower() or "year" in c.lower() or pd.api.types.is_datetime64_any_dtype(frame[c])
+        ]
+        if not date_candidates:
+            date_candidates = all_cols
+        col_d1, col_d2 = st.columns(2)
+        date_col = col_d1.selectbox("Date / Timestamp Column", date_candidates)
+        value_col = col_d2.selectbox("Metric Column (Optional, counts records if blank)", ["(Record Count)"] + numeric_cols)
+        actual_val = None if value_col == "(Record Count)" else value_col
+        if st.button("Generate Time Series", type="primary"):
+            t_res = compute_time_trends(frame, date_col, actual_val)
+            if t_res.get("status") == "ok":
+                trend_df = pd.DataFrame(t_res["trend_table"])
+                st.metric("Time Span", f"{t_res['min_date']} to {t_res['max_date']} ({t_res['span_days']} days)")
+                st.dataframe(trend_df, use_container_width=True)
+                st.plotly_chart(time_series_line(trend_df, "period", "total", f"Trends over {t_res['freq_label']} Intervals"), use_container_width=True)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "ml_time_trend",
+                    f"DateCol: '{date_col}', ValueCol: '{actual_val}', Periods: {len(trend_df)}",
+                )
+            else:
+                st.warning(t_res.get("caveat", "Unable to compute time trend."))
+
     elif task.startswith("Classification"):
         st.subheader("Decision Tree Classification")
+        st.caption("Predict categorical outcomes using numeric and categorical predictors (automatically one-hot encoded).")
         target_col = st.selectbox("Target Column (Classes)", all_cols)
-        available_features = [c for c in numeric_cols if c != target_col]
+        available_features = [c for c in all_cols if c != target_col and c not in {"#", "id", "s.no", "sl.no", "index"}]
         if not available_features:
-            st.warning("No numeric feature columns available. Classification requires numeric predictors.")
+            st.warning("No feature columns available for classification.")
             return
-        selected_features = st.multiselect("Predictor Features", available_features, default=available_features)
+        selected_features = st.multiselect("Predictor Features", available_features, default=available_features[:min(5, len(available_features))])
+
+        if len(frame) < 20:
+            st.info(f"Dataset has {len(frame)} rows (recommended minimum sample size is 20 rows).")
+
         if st.button("Train & Evaluate Classifier"):
             if not selected_features:
                 st.error("Please select at least one feature column.")
@@ -814,15 +1046,16 @@ def _ml_tab(cfg, user: User) -> None:
 
     elif task.startswith("Linear Regression"):
         st.subheader("Linear Regression")
+        st.caption("Estimate continuous numeric outcomes using linear relationships with holdout validation.")
         if not numeric_cols:
             st.warning("No numeric columns available in dataset.")
             return
         target_col = st.selectbox("Target Column (Continuous outcome)", numeric_cols)
-        available_features = [c for c in numeric_cols if c != target_col]
+        available_features = [c for c in all_cols if c != target_col and c not in {"#", "id", "s.no", "sl.no", "index"}]
         if not available_features:
-            st.warning("No additional numeric feature columns available as predictors.")
+            st.warning("No additional feature columns available as predictors.")
             return
-        selected_features = st.multiselect("Predictor Features", available_features, default=available_features)
+        selected_features = st.multiselect("Predictor Features", available_features, default=available_features[:min(5, len(available_features))])
         if st.button("Fit & Evaluate Regression"):
             if not selected_features:
                 st.error("Please select at least one feature column.")
@@ -857,30 +1090,70 @@ def _ml_tab(cfg, user: User) -> None:
             _render_ml_result(result)
 
     elif task.startswith("Anomaly"):
-        st.subheader("IQR Outlier & Anomaly Detection")
+        st.subheader("Outlier & Anomaly Detection")
+        st.caption("Identify statistical deviations using either non-parametric IQR fences or parametric Z-scores.")
         if not numeric_cols:
             st.warning("No numeric columns available in dataset.")
             return
         col = st.selectbox("Column to inspect for outliers", numeric_cols)
-        multiplier = st.slider("IQR Multiplier (default 1.5)", min_value=1.0, max_value=3.0, value=1.5, step=0.1)
-        if st.button("Detect Outliers"):
-            res = detect_iqr_anomalies(frame, col, multiplier=multiplier)
-            _get_audit_log(cfg).record(
-                user.org_id,
-                user.username,
-                "anomaly_detection",
-                f"Task: anomaly_detection, Multiplier: {multiplier}, Outliers: {res.outlier_count}",
-            )
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Outliers Detected", res.outlier_count)
-            c2.metric("Lower Fence", f"{res.lower:.4f}")
-            c3.metric("Upper Fence", f"{res.upper:.4f}")
-            st.info(f"Methodological caveat: {res.caveat}")
-            if res.outlier_row_indexes:
-                st.write(f"Sample Outlier Rows ({len(res.outlier_row_indexes)} detected):")
-                st.dataframe(frame.iloc[res.outlier_row_indexes], use_container_width=True)
-            else:
-                st.success(f"No statistical outliers detected in column '{col}' with multiplier {multiplier}.")
+        method = st.radio("Detection Method", ["IQR Fences (Non-parametric)", "Z-Score (Parametric, Normal Dist.)"], horizontal=True)
+
+        if "IQR" in method:
+            multiplier = st.slider("IQR Multiplier (default 1.5)", min_value=1.0, max_value=3.0, value=1.5, step=0.1)
+            if st.button("Detect Outliers"):
+                res = detect_iqr_anomalies(frame, col, multiplier=multiplier)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "anomaly_detection",
+                    f"Task: anomaly_detection, Multiplier: {multiplier}, Outliers: {res.outlier_count}",
+                )
+                try:
+                    c_anom = st.columns(3)
+                    if isinstance(c_anom, (list, tuple)) and len(c_anom) == 3:
+                        c1, c2, c3 = c_anom
+                    else:
+                        c1, c2, c3 = st, st, st
+                except Exception:
+                    c1, c2, c3 = st, st, st
+                c1.metric("Outliers Detected", res.outlier_count)
+                c2.metric("Lower Fence", f"{res.lower:.4f}")
+                c3.metric("Upper Fence", f"{res.upper:.4f}")
+                st.info(f"Methodological caveat: {res.caveat}")
+                st.plotly_chart(outlier_box(frame, col, lower=res.lower, upper=res.upper, title=f"Box Plot & Outlier Fences for '{col}'"), use_container_width=True)
+                if res.outlier_row_indexes:
+                    st.write(f"Sample Outlier Rows ({len(res.outlier_row_indexes)} detected):")
+                    st.dataframe(frame.iloc[res.outlier_row_indexes], use_container_width=True)
+                else:
+                    st.success(f"No statistical outliers detected in column '{col}' with multiplier {multiplier}.")
+        else:
+            z_thresh = st.slider("Z-Score Threshold (default 3.0)", min_value=1.5, max_value=5.0, value=3.0, step=0.1)
+            if st.button("Detect Outliers"):
+                res = detect_zscore_anomalies(frame, col, threshold=z_thresh)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "anomaly_detection",
+                    f"Task: anomaly_detection, Multiplier: {z_thresh}, Outliers: {res.outlier_count}",
+                )
+                try:
+                    c_anom = st.columns(3)
+                    if isinstance(c_anom, (list, tuple)) and len(c_anom) == 3:
+                        c1, c2, c3 = c_anom
+                    else:
+                        c1, c2, c3 = st, st, st
+                except Exception:
+                    c1, c2, c3 = st, st, st
+                c1.metric("Outliers Detected", res.outlier_count)
+                c2.metric("Mean", f"{res.lower:.4f}")
+                c3.metric("Std Dev", f"{res.upper:.4f}")
+                st.info(f"Methodological caveat: {res.caveat}")
+                st.plotly_chart(outlier_box(frame, col, title=f"Distribution & Outliers for '{col}'"), use_container_width=True)
+                if res.outlier_row_indexes:
+                    st.write(f"Sample Outlier Rows ({len(res.outlier_row_indexes)} detected):")
+                    st.dataframe(frame.iloc[res.outlier_row_indexes], use_container_width=True)
+                else:
+                    st.success(f"No statistical outliers detected in column '{col}' with |Z| > {z_thresh}.")
 
     elif task.startswith("Linear Trend"):
         st.subheader("Linear Trend Forecasting")
@@ -994,9 +1267,17 @@ def _reports_tab(cfg, user: User) -> None:
         ),
     )
     if can(user, "export"):
+        multi_sheet = st.checkbox("Multi-sheet Excel workbook (includes Column Statistics & Data Quality sheets)", value=True)
+        stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
+        quality = assess_quality(ingest.frame, ingest.duplicate_columns)
+        excel_bytes = (
+            to_report_excel_bytes(ingest.frame, stats, quality)
+            if multi_sheet
+            else to_excel_bytes(ingest.frame)
+        )
         st.download_button(
             "Download table Excel",
-            to_excel_bytes(ingest.frame),
+            excel_bytes,
             file_name="table.xlsx",
             on_click=lambda: _safe_record_export_requested(
                 cfg, user, "table", "xlsx", f"Source: '{Path(ingest.source_name).stem}'"
@@ -1020,7 +1301,8 @@ def _reports_tab(cfg, user: User) -> None:
                 cfg, user, "report", "pdf", f"AI included: {include_ai}"
             ),
         )
-        st.json(analysis_metadata(ingest.source_name))
+        with st.expander("Analysis Metadata & Provenance", expanded=False):
+            st.json(analysis_metadata(ingest.source_name))
     else:
         st.caption("Run a question in Ask to enable analysis reports.")
 

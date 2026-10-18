@@ -87,29 +87,15 @@ def evaluate_model_performance(y_true: Any, y_pred: Any, task: str = "classifica
     raise ValueError("Unsupported task. Must be 'classification' or 'regression'.")
 
 
-def run_classification(
+def _prepare_ml_matrix(
     frame: pd.DataFrame,
     target_col: str,
-    feature_cols: list[str] | None = None,
-) -> MLResult:
-    """Run deterministic decision tree classification.
-
-    Parameters
-    ----------
-    frame : pd.DataFrame
-        Loaded dataset.
-    target_col : str
-        Name of target column.
-    feature_cols : list[str] | None
-        List of feature column names; if None, uses all numeric columns except target.
-
-    Returns
-    -------
-    MLResult
-        Classification result containing metrics, parameters, and caveats.
-    """
-    if target_col not in frame.columns:
-        raise ValidationError("Target column is not in the loaded table.")
+    feature_cols: list[str] | None,
+    task: str = "classification",
+) -> tuple[pd.DataFrame, pd.Series, list[str], list[str], dict[str, Any]]:
+    """Validate, clean, and encode feature columns for machine learning models."""
+    caveats: list[str] = []
+    metadata: dict[str, Any] = {}
 
     if feature_cols is None:
         selected_features = [col for col in frame.columns if col != target_col and _is_numeric(frame[col])]
@@ -117,25 +103,148 @@ def run_classification(
         for col in feature_cols:
             if col not in frame.columns:
                 raise ValidationError("One or more feature columns are not in the loaded table.")
-            if not _is_numeric(frame[col]):
-                raise ValidationError("Classification feature columns must be numeric.")
         selected_features = [col for col in feature_cols if col != target_col]
 
     if not selected_features:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    cols_to_use = [target_col] + selected_features
+    clean_df = frame[cols_to_use].dropna().copy()
+    if clean_df.empty:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    encoded_parts: list[pd.DataFrame] = []
+    final_selected: list[str] = []
+
+    for col in selected_features:
+        series = clean_df[col]
+        if _is_numeric(series):
+            # Check target leakage: if feature column is identical to target
+            if series.equals(clean_df[target_col]):
+                caveats.append(
+                    f"Excluded feature '{col}' because its values are identical to target column '{target_col}' (target leakage)."
+                )
+                continue
+            encoded_parts.append(clean_df[[col]].astype(float))
+            final_selected.append(col)
+        else:
+            uniq = int(series.nunique())
+            if uniq > 20:
+                raise ValidationError(
+                    f"Feature column '{col}' is not numeric and has too many distinct values ({uniq}) for one-hot encoding."
+                )
+            dummies = pd.get_dummies(series, prefix=col, drop_first=True, dtype=float)
+            encoded_parts.append(dummies)
+            final_selected.append(col)
+            caveats.append(
+                f"Categorical feature '{col}' was automatically one-hot encoded into {len(dummies.columns)} binary indicators."
+            )
+
+    if not encoded_parts:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    X = pd.concat(encoded_parts, axis=1)
+    y = clean_df[target_col]
+    metadata["row_count"] = int(clean_df.shape[0])
+    metadata["encoded_columns"] = list(X.columns)
+
+    return X, y, final_selected, caveats, metadata
+
+
+def run_classification(
+    frame: pd.DataFrame,
+    target_col: str,
+    feature_cols: list[str] | None = None,
+) -> MLResult:
+    """Run deterministic decision tree classification with train/test metrics and categorical encoding."""
+    """Validate, clean, and encode feature columns for machine learning models."""
+    caveats: list[str] = []
+    metadata: dict[str, Any] = {}
+
+    if feature_cols is None:
+        selected_features = [col for col in frame.columns if col != target_col and _is_numeric(frame[col])]
+    else:
+        for col in feature_cols:
+            if col not in frame.columns:
+                raise ValidationError("One or more feature columns are not in the loaded table.")
+        selected_features = [col for col in feature_cols if col != target_col]
+
+    if not selected_features:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    cols_to_use = [target_col] + selected_features
+    clean_df = frame[cols_to_use].dropna().copy()
+    if clean_df.empty:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    encoded_parts: list[pd.DataFrame] = []
+    final_selected: list[str] = []
+
+    for col in selected_features:
+        series = clean_df[col]
+        if _is_numeric(series):
+            # Check target leakage for numeric targets
+            if _is_numeric(clean_df[target_col]):
+                s_numeric = pd.to_numeric(series, errors="coerce")
+                t_numeric = pd.to_numeric(clean_df[target_col], errors="coerce")
+                valid_idx = s_numeric.notna() & t_numeric.notna()
+                if valid_idx.sum() >= 3:
+                    corr = float(s_numeric[valid_idx].corr(t_numeric[valid_idx]))
+                    if abs(corr) >= 0.999:
+                        caveats.append(
+                            f"Excluded feature '{col}' due to extreme target correlation ({corr:.4f}), which indicates target leakage."
+                        )
+                        continue
+            encoded_parts.append(clean_df[[col]].astype(float))
+            final_selected.append(col)
+        else:
+            uniq = int(series.nunique())
+            if uniq > 20:
+                raise ValidationError(
+                    f"Feature column '{col}' is not numeric and has too many distinct values ({uniq}) for one-hot encoding."
+                )
+            dummies = pd.get_dummies(series, prefix=col, drop_first=True, dtype=float)
+            encoded_parts.append(dummies)
+            final_selected.append(col)
+            caveats.append(
+                f"Categorical feature '{col}' was automatically one-hot encoded into {len(dummies.columns)} binary indicators."
+            )
+
+    if not encoded_parts:
+        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+
+    X = pd.concat(encoded_parts, axis=1)
+    y = clean_df[target_col]
+    metadata["row_count"] = int(clean_df.shape[0])
+    metadata["encoded_columns"] = list(X.columns)
+
+    return X, y, final_selected, caveats, metadata
+
+
+def run_classification(
+    frame: pd.DataFrame,
+    target_col: str,
+    feature_cols: list[str] | None = None,
+) -> MLResult:
+    """Run deterministic decision tree classification with train/test metrics and categorical encoding."""
+    if target_col not in frame.columns:
+        raise ValidationError("Target column is not in the loaded table.")
+
+    X, y, selected_features, prep_caveats, metadata = _prepare_ml_matrix(
+        frame, target_col, feature_cols, task="classification"
+    )
+
+    if not selected_features or X.empty:
         return MLResult(
             task="classification",
             status="error",
             metrics={},
             parameters={"target_col": target_col, "feature_cols": []},
-            caveats=["No valid numeric feature columns available for classification."],
+            caveats=["No valid feature columns available for classification."],
         )
 
-    # Handle NaN values by dropping rows with NaN in relevant columns
-    cols_to_use = [target_col] + selected_features
-    clean_df = frame[cols_to_use].dropna()
-
-    # Validate that there are enough rows (at least 20)
-    if int(clean_df.shape[0]) < 20:
+    # Validate row count
+    if int(X.shape[0]) < 20:
         return MLResult(
             task="classification",
             status="insufficient_data",
@@ -143,13 +252,13 @@ def run_classification(
             parameters={
                 "target_col": target_col,
                 "feature_cols": selected_features,
-                "row_count": int(clean_df.shape[0]),
+                "row_count": int(X.shape[0]),
             },
             caveats=["Classification requires at least 20 complete rows of data."],
         )
 
-    # Validate target has at least 2 distinct values
-    unique_target_count = int(clean_df[target_col].nunique())
+    # Validate target has at least 2 distinct classes
+    unique_target_count = int(y.nunique())
     if unique_target_count < 2:
         return MLResult(
             task="classification",
@@ -158,14 +267,11 @@ def run_classification(
             parameters={
                 "target_col": target_col,
                 "feature_cols": selected_features,
-                "row_count": int(clean_df.shape[0]),
+                "row_count": int(X.shape[0]),
                 "unique_classes": unique_target_count,
             },
             caveats=["Classification target column must contain at least 2 distinct classes."],
         )
-
-    X = clean_df[selected_features]
-    y = clean_df[target_col]
 
     # Train/test split (80/20, random_state=42)
     X_train, X_test, y_train, y_test = train_test_split(
@@ -177,20 +283,47 @@ def run_classification(
 
     clf = DecisionTreeClassifier(random_state=42)
     clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
+    y_pred_test = clf.predict(X_test)
+    y_pred_train = clf.predict(X_train)
 
-    metrics = evaluate_model_performance(y_test, y_pred, task="classification")
+    metrics = evaluate_model_performance(y_test, y_pred_test, task="classification")
+    train_metrics = evaluate_model_performance(y_train, y_pred_train, task="classification")
 
-    caveats = [
+    metrics["train_accuracy"] = train_metrics["accuracy"]
+    metrics["test_accuracy"] = metrics["accuracy"]
+    metrics["train_f1"] = train_metrics["f1"]
+    metrics["test_f1"] = metrics["f1"]
+    metrics["feature_importances"] = {
+        str(col): round(float(imp), 4) for col, imp in zip(X.columns, clf.feature_importances_)
+    }
+
+    caveats = list(prep_caveats)
+    # Check class imbalance
+    class_dist = y.value_counts(normalize=True)
+    if float(class_dist.min()) < 0.15:
+        minority_class = class_dist.idxmin()
+        caveats.append(
+            f"Class imbalance detected: minority class '{minority_class}' represents only {class_dist.min() * 100:.1f}% of instances."
+        )
+
+    # Check overfitting
+    acc_diff = metrics["train_accuracy"] - metrics["test_accuracy"]
+    if acc_diff > 0.15:
+        caveats.append(
+            f"Model shows noticeable overfitting: Train Accuracy is {metrics['train_accuracy'] * 100:.1f}%, while Test Accuracy is {metrics['test_accuracy'] * 100:.1f}%."
+        )
+
+    caveats.extend([
         "Decision tree models are prone to overfitting, particularly on small sample sizes.",
         "Performance metrics are evaluated on an 80/20 train/test holdout split and may vary with different splits.",
         "This model output is a statistical estimate and must not be treated as ground truth or unvalidated fact.",
-    ]
+    ])
 
     parameters: dict[str, Any] = {
         "model": "DecisionTreeClassifier",
         "target_col": target_col,
         "feature_cols": selected_features,
+        "encoded_columns": list(X.columns),
         "test_size": 0.2,
         "random_state": 42,
         "train_rows": int(len(X_train)),
@@ -212,39 +345,18 @@ def run_regression(
     target_col: str,
     feature_cols: list[str] | None = None,
 ) -> MLResult:
-    """Run deterministic linear regression.
-
-    Parameters
-    ----------
-    frame : pd.DataFrame
-        Loaded dataset.
-    target_col : str
-        Name of numeric target column.
-    feature_cols : list[str] | None
-        List of feature column names; if None, uses all numeric columns except target.
-
-    Returns
-    -------
-    MLResult
-        Regression result containing metrics, coefficients, parameters, and caveats.
-    """
+    """Run deterministic linear regression with train/test metrics and categorical encoding."""
     if target_col not in frame.columns:
         raise ValidationError("Target column is not in the loaded table.")
 
     if not _is_numeric(frame[target_col]):
         raise ValidationError("Target column must be numeric for regression.")
 
-    if feature_cols is None:
-        selected_features = [col for col in frame.columns if col != target_col and _is_numeric(frame[col])]
-    else:
-        for col in feature_cols:
-            if col not in frame.columns:
-                raise ValidationError("One or more feature columns are not in the loaded table.")
-            if not _is_numeric(frame[col]):
-                raise ValidationError("Regression feature columns must be numeric.")
-        selected_features = [col for col in feature_cols if col != target_col]
+    X, y, selected_features, prep_caveats, metadata = _prepare_ml_matrix(
+        frame, target_col, feature_cols, task="regression"
+    )
 
-    if not selected_features:
+    if not selected_features or X.empty:
         return MLResult(
             task="regression",
             status="error",
@@ -253,11 +365,7 @@ def run_regression(
             caveats=["No valid numeric feature columns available for regression."],
         )
 
-    # Handle NaN values by dropping rows with NaN in relevant columns
-    cols_to_use = [target_col] + selected_features
-    clean_df = frame[cols_to_use].dropna()
-
-    if int(clean_df.shape[0]) < 20:
+    if int(X.shape[0]) < 20:
         return MLResult(
             task="regression",
             status="insufficient_data",
@@ -265,13 +373,10 @@ def run_regression(
             parameters={
                 "target_col": target_col,
                 "feature_cols": selected_features,
-                "row_count": int(clean_df.shape[0]),
+                "row_count": int(X.shape[0]),
             },
             caveats=["Regression requires at least 20 complete rows of data."],
         )
-
-    X = clean_df[selected_features]
-    y = clean_df[target_col]
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
@@ -282,24 +387,39 @@ def run_regression(
 
     reg = LinearRegression()
     reg.fit(X_train, y_train)
-    y_pred = reg.predict(X_test)
+    y_pred_test = reg.predict(X_test)
+    y_pred_train = reg.predict(X_train)
 
-    metrics = evaluate_model_performance(y_test, y_pred, task="regression")
-    coefficients = {str(col): float(coef) for col, coef in zip(selected_features, reg.coef_)}
+    metrics = evaluate_model_performance(y_test, y_pred_test, task="regression")
+    train_metrics = evaluate_model_performance(y_train, y_pred_train, task="regression")
+
+    metrics["train_r2"] = train_metrics["r2"]
+    metrics["test_r2"] = metrics["r2"]
+    metrics["train_rmse"] = train_metrics["rmse"]
+    metrics["test_rmse"] = metrics["rmse"]
+    coefficients = {str(col): float(coef) for col, coef in zip(X.columns, reg.coef_)}
     metrics["coefficients"] = coefficients
     metrics["intercept"] = float(reg.intercept_)
 
-    caveats = [
+    caveats = list(prep_caveats)
+    r2_diff = metrics["train_r2"] - metrics["test_r2"]
+    if r2_diff > 0.15:
+        caveats.append(
+            f"Model indicates generalization gap: Train R² is {metrics['train_r2']:.3f}, but Test R² dropped to {metrics['test_r2']:.3f}."
+        )
+
+    caveats.extend([
         "Linear regression assumes linear relationships and absence of strong multicollinearity.",
         "Performance metrics are evaluated on an 80/20 train/test holdout split and do not guarantee future accuracy.",
         "Regression coefficients describe statistical association in the sample, not causal mechanisms.",
         "This model output is a statistical estimate and must not be treated as ground truth or unvalidated fact.",
-    ]
+    ])
 
     parameters: dict[str, Any] = {
         "model": "LinearRegression",
         "target_col": target_col,
         "feature_cols": selected_features,
+        "encoded_columns": list(X.columns),
         "test_size": 0.2,
         "random_state": 42,
         "train_rows": int(len(X_train)),

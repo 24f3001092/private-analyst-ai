@@ -109,6 +109,26 @@ def deterministic_explanation(result: OperationResult, question: str) -> str:
                 lines.append(f"  - **{cat}:** {cnt} records ({pct:.1f}%)")
             lines.append("")
 
+        elif "top_correlations" in calc:
+            lines.append("- **Top Pairwise Correlations:**")
+            for pair in calc.get("top_correlations", [])[:5]:
+                c1 = pair.get("col1")
+                c2 = pair.get("col2")
+                r = pair.get("correlation", 0.0)
+                rel = pair.get("relationship", "")
+                lines.append(f"  - **{c1}** & **{c2}**: `r = {r:+.3f}` ({rel})")
+            lines.append("")
+
+        elif "trend_table" in calc:
+            tt = calc.get("trend_table", [])
+            lines.append(f"- **Temporal Trend Breakdown ({calc.get('freq_label', 'Period')}):**")
+            for row in tt[:8]:
+                period = row.get("period", "")
+                cnt = row.get("count", 0)
+                tot = row.get("total", 0.0)
+                lines.append(f"  - **{period}:** {cnt} event(s) (total={tot})")
+            lines.append("")
+
         elif "crosstab" in calc:
             lines.append("- **Cross-Tabulation Matrix:** Available in data table view.")
             lines.append("")
@@ -148,23 +168,74 @@ def deterministic_explanation(result: OperationResult, question: str) -> str:
     return "\n".join(lines).strip()
 
 
-def explain_results(result: OperationResult, question: str, cfg: AIConfig) -> dict:
+def build_evidence_brief(result: OperationResult, question: str) -> str:
+    """Format a compact, structured Markdown evidence brief for the local language model."""
+    brief_lines = [
+        "### Verified Analytical Evidence",
+        f"- **Question**: {question.strip()}",
+        f"- **Intent**: {result.intent}",
+        f"- **Status**: {result.status}",
+    ]
+    if result.observed:
+        obs_items = [f"{k}={v}" for k, v in result.observed.items() if not isinstance(v, (list, dict))]
+        if obs_items:
+            brief_lines.append(f"- **Observed Attributes**: {', '.join(obs_items)}")
+
+    calc = result.calculated
+    if calc:
+        if "quality_score" in calc:
+            brief_lines.append(f"- **Data Quality Score**: {calc.get('quality_score')} / 100 ({calc.get('grade')})")
+            brief_lines.append(f"- **Total Missing Cells**: {calc.get('total_missing_cells', 0)}")
+            brief_lines.append(f"- **Duplicate Rows**: {calc.get('duplicate_rows', 0)}")
+        elif "frequency_table" in calc:
+            top_cats = [
+                f"{r.get('Category', r.get('category'))}: {r.get('Count', r.get('count'))} ({r.get('Percentage (%)', r.get('percentage', 0))}%)"
+                for r in calc.get("frequency_table", [])[:5]
+            ]
+            brief_lines.append(f"- **Top Categories**: {'; '.join(top_cats)}")
+        elif "top_correlations" in calc:
+            top_corr = [
+                f"{p.get('col1')} vs {p.get('col2')}: {p.get('correlation')}"
+                for p in calc.get("top_correlations", [])[:4]
+            ]
+            brief_lines.append(f"- **Top Correlations**: {'; '.join(top_corr)}")
+        elif "outlier_count" in calc:
+            brief_lines.append(f"- **Outliers**: {calc.get('outlier_count')} found via {calc.get('method')} in [{calc.get('lower')}, {calc.get('upper')}]")
+
+    if result.hypotheses:
+        brief_lines.append(f"- **Caveats**: {'; '.join(result.hypotheses[:2])}")
+    if result.limitations:
+        brief_lines.append(f"- **Limitations**: {'; '.join(result.limitations[:2])}")
+
+    return "\n".join(brief_lines)
+
+
+def explain_results(
+    result: OperationResult,
+    question: str,
+    cfg: AIConfig,
+    follow_up_context: str | None = None,
+) -> dict:
     fallback = deterministic_explanation(result, question)
-    facts = {
-        "question": question,
-        "intent": result.intent,
-        "status": result.status,
-        "observed": result.observed,
-        "calculated": result.calculated,
-        "hypotheses": result.hypotheses,
-        "recommendations": result.recommendations,
-        "limitations": result.limitations,
-    }
+    evidence_brief = build_evidence_brief(result, question)
+
+    context_section = ""
+    if follow_up_context:
+        context_section = f"\n\n### Prior Conversation Context\n{follow_up_context[:1000]}"
+
     prompt = (
         SYSTEM_RULES
         + "\n\n"
-        + wrap_untrusted("facts_json", json.dumps(facts, default=str)[:6000])
-        + "\n\nWrite a short explanation for a business user."
+        + wrap_untrusted("evidence_summary", evidence_brief)
+        + context_section
+        + "\n\nWrite a concise executive briefing for a business leader based strictly on the verified evidence above."
+        + "\nStructure your response as follows:"
+        + "\n- **Executive Summary**: 2-3 sentences."
+        + "\n- **Key Findings**: 3-4 bullet points citing verified numbers."
+        + "\n- **Recommendations & Next Steps**: 2 grounded recommendations."
+        + "\n- **Critical Limitations**: 1-2 caveats."
+        + "\nLabel claims with [Observed Fact], [Calculated Metric], or [Model Interpretation]."
+        + "\nNever invent unstated numbers, prize values, or dates."
     )
     client = LocalModelClient(cfg)
     status = client.status()

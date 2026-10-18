@@ -78,3 +78,49 @@ def missingness(missing_by_column: dict[str, int]):
         yaxis=dict(rangemode="tozero"),
     )
     return fig
+
+
+def correlation_heatmap(corr_df: pd.DataFrame | dict[str, dict[str, float]], title: str = "Feature Correlation Matrix"):
+    df = pd.DataFrame(corr_df) if isinstance(corr_df, dict) else corr_df
+    fig = px.imshow(
+        df,
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        zmin=-1.0,
+        zmax=1.0,
+        title=title,
+        labels=dict(color="Correlation"),
+    )
+    fig.update_layout(margin=dict(l=20, r=20, t=40, b=30))
+    return fig
+
+
+def time_series_line(trend_df: pd.DataFrame, date_col: str = "period", val_col: str = "count", title: str = "Temporal Trend"):
+    fig = px.line(
+        trend_df,
+        x=date_col,
+        y=val_col,
+        markers=True,
+        title=title,
+        labels={date_col: "Period", val_col: val_col.title()},
+    )
+    fig.update_layout(margin=dict(l=20, r=20, t=40, b=30), yaxis=dict(rangemode="tozero"))
+    return fig
+
+
+def outlier_box(
+    frame: pd.DataFrame,
+    column: str,
+    lower: float | None = None,
+    upper: float | None = None,
+    title: str | None = None,
+):
+    t = title or f"Outlier Analysis: {column}"
+    fig = px.box(frame, y=column, points="all", title=t)
+    if lower is not None and isinstance(lower, (int, float)):
+        fig.add_hline(y=float(lower), line_dash="dash", line_color="orange", annotation_text=f"Lower ({float(lower):.1f})")
+    if upper is not None and isinstance(upper, (int, float)):
+        fig.add_hline(y=float(upper), line_dash="dash", line_color="red", annotation_text=f"Upper ({float(upper):.1f})")
+    fig.update_layout(margin=dict(l=20, r=20, t=40, b=30))
+    return fig

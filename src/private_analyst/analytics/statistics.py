@@ -30,6 +30,9 @@ class ColumnStats:
     min_length: int | None = None
     max_length: int | None = None
     mean_length: float | None = None
+    currency_symbol: str | None = None
+    parsed_sum: float | None = None
+    parsed_mean: float | None = None
     evidence: str = "calculated_from_loaded_table"
 
 
@@ -100,8 +103,21 @@ def compute_column_stats(series: pd.Series, name: str, inferred_type: str | None
     top_val = str(val_counts.index[0]) if not val_counts.empty else None
     top_freq = int(val_counts.iloc[0]) if not val_counts.empty else None
 
+    currency_sym = None
+    parsed_sum = None
+    parsed_mean = None
     if inferred_type in ("url", "currency", "datetime", "datetime_string"):
         kind = inferred_type
+        if kind == "currency":
+            from private_analyst.ingestion.loader import parse_currency
+            parsed = [parse_currency(v) for v in non_null]
+            valid_nums = [p[0] for p in parsed if p[0] is not None]
+            symbols = [p[1] for p in parsed if p[1] is not None]
+            if symbols:
+                currency_sym = symbols[0]
+            if valid_nums:
+                parsed_sum = round(float(sum(valid_nums)), 2)
+                parsed_mean = round(float(np.mean(valid_nums)), 2)
     else:
         kind = "categorical" if unique <= 25 else "text"
 
@@ -119,6 +135,9 @@ def compute_column_stats(series: pd.Series, name: str, inferred_type: str | None
         min_length=int(lengths.min()) if not lengths.empty else None,
         max_length=int(lengths.max()) if not lengths.empty else None,
         mean_length=round(float(lengths.mean()), 1) if not lengths.empty else None,
+        currency_symbol=currency_sym,
+        parsed_sum=parsed_sum,
+        parsed_mean=parsed_mean,
     )
 
 
@@ -190,3 +209,208 @@ def group_compare(frame: pd.DataFrame, group_col: str, value_col: str) -> pd.Dat
     # Otherwise, compute categorical cross-tabulation frequency
     crosstab = pd.crosstab(frame[group_col], frame[value_col], dropna=False, margins=True, margins_name="Total")
     return crosstab.reset_index()
+
+
+def compute_correlation_matrix(frame: pd.DataFrame, method: str = "pearson") -> dict[str, Any]:
+    """Compute pairwise correlation for numeric columns with non-zero variance."""
+    numeric_cols = [c for c in frame.columns if _is_numeric(frame[c])]
+    valid_cols = []
+    for c in numeric_cols:
+        series = _finite_numeric(frame[c])
+        if series.nunique() > 1:
+            valid_cols.append(c)
+
+    if len(valid_cols) < 2:
+        return {
+            "status": "insufficient_features",
+            "columns": valid_cols,
+            "matrix": {},
+            "top_correlations": [],
+            "caveat": "Correlation analysis requires at least two numeric columns with variation.",
+        }
+
+    clean_sub = frame[valid_cols].apply(pd.to_numeric, errors="coerce").dropna()
+    if len(clean_sub) < 3:
+        return {
+            "status": "insufficient_data",
+            "columns": valid_cols,
+            "matrix": {},
+            "top_correlations": [],
+            "caveat": "At least 3 complete observations are required to compute correlations.",
+        }
+
+    corr_df = clean_sub.corr(method=method).round(3)
+    pairs = []
+    for i in range(len(valid_cols)):
+        for j in range(i + 1, len(valid_cols)):
+            c1, c2 = valid_cols[i], valid_cols[j]
+            val = float(corr_df.loc[c1, c2])
+            if np.isfinite(val):
+                rel = (
+                    "Strong Positive"
+                    if val >= 0.7
+                    else (
+                        "Moderate Positive"
+                        if val >= 0.4
+                        else (
+                            "Weak / None"
+                            if val > -0.4
+                            else ("Moderate Negative" if val > -0.7 else "Strong Negative")
+                        )
+                    )
+                )
+                pairs.append({
+                    "col1": c1,
+                    "col2": c2,
+                    "correlation": val,
+                    "abs_correlation": abs(val),
+                    "relationship": rel,
+                })
+    pairs.sort(key=lambda x: x["abs_correlation"], reverse=True)
+    return {
+        "status": "ok",
+        "method": method,
+        "columns": valid_cols,
+        "matrix": corr_df.to_dict(),
+        "top_correlations": pairs[:10],
+        "caveat": "Correlation indicates linear association, not causation.",
+    }
+
+
+def compute_time_trends(
+    frame: pd.DataFrame,
+    date_col: str,
+    value_col: str | None = None,
+    freq: str = "auto",
+) -> dict[str, Any]:
+    """Aggregate records or numeric metrics over time periods."""
+    if date_col not in frame.columns:
+        raise KeyError(f"Date column '{date_col}' not found.")
+
+    parsed_dates = pd.to_datetime(frame[date_col], errors="coerce", format="mixed")
+    valid_mask = parsed_dates.notna()
+    if valid_mask.sum() < 2:
+        return {
+            "status": "insufficient_dates",
+            "date_col": date_col,
+            "records": [],
+            "caveat": "Need at least 2 valid dates to compute time trends.",
+        }
+
+    sub = pd.DataFrame({"_date": parsed_dates[valid_mask]})
+    min_date = sub["_date"].min()
+    max_date = sub["_date"].max()
+    span_days = int((max_date - min_date).days)
+
+    if freq == "auto":
+        if span_days <= 60:
+            period_fmt = "%Y-%m-%d"
+            freq_label = "Daily"
+        elif span_days <= 730:
+            period_fmt = "%Y-%m"
+            freq_label = "Monthly"
+        else:
+            period_fmt = "%Y"
+            freq_label = "Yearly"
+    else:
+        period_fmt = "%Y-%m"
+        freq_label = "Monthly"
+
+    sub["period"] = sub["_date"].dt.strftime(period_fmt)
+
+    if value_col and value_col in frame.columns and _is_numeric(frame[value_col]):
+        sub["value"] = pd.to_numeric(frame.loc[valid_mask, value_col], errors="coerce")
+        agg = sub.groupby("period")["value"].agg(
+            count="count",
+            total="sum",
+            mean="mean",
+        ).reset_index()
+    else:
+        agg = sub.groupby("period").size().reset_index(name="count")
+        agg["total"] = agg["count"]
+        agg["mean"] = 1.0
+
+    agg = agg.sort_values("period")
+    return {
+        "status": "ok",
+        "date_col": date_col,
+        "value_col": value_col,
+        "freq_label": freq_label,
+        "min_date": str(min_date)[:10],
+        "max_date": str(max_date)[:10],
+        "span_days": span_days,
+        "trend_table": agg.to_dict(orient="records"),
+        "caveat": "Time aggregations are based on parsed dates and exclude invalid date entries.",
+    }
+
+
+def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> list[dict[str, Any]]:
+    """Recommend the most informative visualizations based on column types and distributions."""
+    if stats is None:
+        stats = compute_dataset_stats(frame)
+    recs: list[dict[str, Any]] = []
+
+    # 1. Frequency distributions for top categorical features
+    for col in (stats.categorical_column_names or []):
+        if col.lower() in {"#", "id", "s.no", "sl.no", "index"}:
+            continue
+        c_stats = next((c for c in stats.columns if c.name == col), None)
+        if c_stats and 2 <= c_stats.unique <= 30:
+            recs.append({
+                "type": "category_bar",
+                "column": col,
+                "title": f"Distribution of {col}",
+                "description": f"Displays counts across the {c_stats.unique} distinct values of '{col}'.",
+                "priority": 1,
+            })
+            if len(recs) >= 2:
+                break
+
+    # 2. Histograms for numeric columns
+    for col in (stats.numeric_column_names or []):
+        c_stats = next((c for c in stats.columns if c.name == col), None)
+        if c_stats and c_stats.unique > 3:
+            recs.append({
+                "type": "histogram",
+                "column": col,
+                "title": f"Distribution of {col}",
+                "description": f"Examines spread, skewness, and outliers in numeric feature '{col}'.",
+                "priority": 2,
+            })
+            if len(recs) >= 4:
+                break
+
+    # 3. Cross-tabulation / heatmap if >= 2 categorical
+    cat_candidates = [c for c in stats.categorical_column_names if c.lower() not in {"#", "id", "s.no", "sl.no", "index"}]
+    if len(cat_candidates) >= 2:
+        recs.append({
+            "type": "crosstab_heatmap",
+            "row_col": cat_candidates[0],
+            "col_col": cat_candidates[1],
+            "title": f"{cat_candidates[0]} vs. {cat_candidates[1]} Contingency Matrix",
+            "description": f"Highlights interactions and co-occurrences between '{cat_candidates[0]}' and '{cat_candidates[1]}'.",
+            "priority": 3,
+        })
+
+    # 4. Correlation heatmap if >= 2 numeric
+    if len(stats.numeric_column_names) >= 2:
+        recs.append({
+            "type": "correlation_heatmap",
+            "columns": stats.numeric_column_names[:8],
+            "title": "Numeric Feature Correlation Matrix",
+            "description": "Visualizes Pearson correlations across numeric features to identify collinear attributes.",
+            "priority": 4,
+        })
+
+    # 5. Time series trend if date column present
+    if stats.date_column_names:
+        recs.append({
+            "type": "time_series",
+            "date_col": stats.date_column_names[0],
+            "value_col": stats.numeric_column_names[0] if stats.numeric_column_names else None,
+            "title": f"Timeline Trend ({stats.date_column_names[0]})",
+            "description": f"Tracks event cadence or metric trajectory over '{stats.date_column_names[0]}'.",
+            "priority": 5,
+        })
+
+    return recs
