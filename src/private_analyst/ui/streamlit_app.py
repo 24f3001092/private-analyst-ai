@@ -37,6 +37,7 @@ from private_analyst.ingestion.loader import (
     apply_transformations,
     inspect_workbook,
     load_tabular,
+    normalize_cleaning_operation,
     repair_unnamed_columns,
 )
 from private_analyst.reports.exporters import (
@@ -379,19 +380,19 @@ def _import_tab(cfg, user: User) -> None:
         with tab_ledger:
             st.subheader("Data Cleaning Ledger & Audit Trail")
             st.caption("Verifiable record of every automated normalization and filtering step performed on ingestion.")
-            ops = getattr(ingest, "cleaning_operations", [])
+            ops = getattr(ingest, "cleaning_log", None) or getattr(ingest, "cleaning_operations", [])
             if ops:
-                ledger_rows = [
-                    {
-                        "Step": op.step.replace("_", " ").title(),
-                        "Description": op.description,
-                        "Impact": op.impact,
-                        "Rows Affected": op.rows_affected,
-                        "Affected Columns": ", ".join(op.affected_columns) if op.affected_columns else "All",
-                        "Timestamp": op.timestamp[:19].replace("T", " ") if hasattr(op, "timestamp") else "-",
-                    }
-                    for op in ops
-                ]
+                ledger_rows = []
+                warnings = []
+                for op in ops:
+                    row, warn = normalize_cleaning_operation(op)
+                    ledger_rows.append(row)
+                    if warn:
+                        warnings.append(warn)
+
+                if warnings:
+                    st.warning(f"Notice: {len(warnings)} cleaning log entry/entries had non-standard formatting. All details were retained.")
+
                 st.dataframe(pd.DataFrame(ledger_rows), use_container_width=True)
             else:
                 st.success("No automated cleaning operations were required. The input dataset was already clean and tabular.")
@@ -417,7 +418,12 @@ def _import_tab(cfg, user: User) -> None:
                 if st.button("Auto-Repair Unnamed Headers"):
                     repaired_frame, renamed, op = repair_unnamed_columns(ingest.frame)
                     if op:
-                        ingest.cleaning_operations.append(op)
+                        if hasattr(ingest, "add_cleaning_operation"):
+                            ingest.add_cleaning_operation(op)
+                        elif hasattr(ingest, "cleaning_log"):
+                            ingest.cleaning_log.append(op)
+                        elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                            ingest.cleaning_operations.append(op)
                     ingest.frame = repaired_frame
                     ingest.unnamed_columns = []
                     st.session_state.ingest = ingest
@@ -440,7 +446,13 @@ def _import_tab(cfg, user: User) -> None:
                 )
                 ingest.frame = transformed_frame
                 ingest.header_row = override_header
-                ingest.cleaning_operations.extend(new_ops)
+                for nop in new_ops:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(nop)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(nop)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(nop)
                 st.session_state.ingest = ingest
                 st.success(f"Applied header override to row {override_header + 1}.")
                 st.rerun()

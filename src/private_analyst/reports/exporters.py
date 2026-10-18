@@ -155,6 +155,14 @@ def to_report_excel_bytes(
                 {"Metric": "Duplicate Rows", "Value": d_rows},
             ]
             pd.DataFrame(q_rows).to_excel(writer, sheet_name="Data Quality", index=False)
+
+        # Handle cleaning ledger if available on the ingest object
+        cleaning_ops = getattr(frame, "cleaning_log", None) or getattr(frame, "cleaning_operations", None)
+        if cleaning_ops:
+            from private_analyst.ingestion.loader import normalize_cleaning_operation
+            c_rows = [normalize_cleaning_operation(op)[0] for op in cleaning_ops]
+            if c_rows:
+                pd.DataFrame(c_rows).to_excel(writer, sheet_name="Cleaning Ledger", index=False)
     return buffer.getvalue()
 
 

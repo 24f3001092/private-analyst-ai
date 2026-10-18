@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import io
 import re
 from dataclasses import dataclass, field
@@ -29,15 +30,157 @@ class CleaningOperation:
     impact: str
     affected_columns: list[str] = field(default_factory=list)
     rows_affected: int = 0
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "step": self.step,
             "description": self.description,
             "impact": self.impact,
-            "affected_columns": self.affected_columns,
+            "affected_columns": list(self.affected_columns) if self.affected_columns else [],
             "rows_affected": self.rows_affected,
+            "timestamp": self.timestamp,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | Any) -> CleaningOperation:
+        if not isinstance(data, dict):
+            return cls(
+                step="unstructured_operation",
+                description=str(data) if data is not None else "Empty operation",
+                impact="Unstructured cleaning operation",
+                affected_columns=[],
+                rows_affected=0,
+            )
+        raw_step = data.get("step") or data.get("Step")
+        raw_desc = data.get("description") or data.get("Description")
+        raw_impact = data.get("impact") or data.get("Impact")
+        raw_cols = data.get("affected_columns") or data.get("Affected Columns") or []
+        raw_rows = data.get("rows_affected") if "rows_affected" in data else data.get("Rows Affected", 0)
+        raw_ts = data.get("timestamp") or data.get("Timestamp")
+
+        if isinstance(raw_cols, str):
+            cols = [c.strip() for c in raw_cols.split(",") if c.strip()]
+        elif isinstance(raw_cols, (list, tuple, set)):
+            cols = [str(c) for c in raw_cols]
+        else:
+            cols = []
+
+        try:
+            rows = int(raw_rows) if raw_rows is not None else 0
+        except (ValueError, TypeError):
+            rows = 0
+
+        ts = str(raw_ts) if raw_ts else datetime.now(timezone.utc).isoformat()
+
+        return cls(
+            step=str(raw_step).strip() if raw_step else "unknown_step",
+            description=str(raw_desc).strip() if raw_desc else "No description provided",
+            impact=str(raw_impact).strip() if raw_impact else "No impact recorded",
+            affected_columns=cols,
+            rows_affected=rows,
+            timestamp=ts,
+        )
+
+
+def normalize_cleaning_operation(op: Any) -> tuple[dict[str, Any], str | None]:
+    """Normalize a cleaning operation (dict, CleaningOperation, or arbitrary record) into a displayable dict.
+
+    Returns:
+        (entry_dict, warning_message_if_malformed)
+    """
+    warning = None
+    if op is None:
+        return {
+            "Step": "Unknown Step",
+            "Description": "Empty operation record",
+            "Impact": "-",
+            "Rows Affected": 0,
+            "Affected Columns": "All",
+            "Timestamp": "-",
+        }, "Empty or null cleaning operation detected."
+
+    if isinstance(op, CleaningOperation):
+        step_str = op.step.replace("_", " ").strip().title() if op.step else "Unknown Step"
+        ts_str = op.timestamp[:19].replace("T", " ") if getattr(op, "timestamp", None) else "-"
+        cols_str = ", ".join(op.affected_columns) if op.affected_columns else "All"
+        return {
+            "Step": step_str,
+            "Description": op.description or "No description provided",
+            "Impact": op.impact or "-",
+            "Rows Affected": op.rows_affected if isinstance(op.rows_affected, int) else 0,
+            "Affected Columns": cols_str,
+            "Timestamp": ts_str,
+        }, None
+
+    if isinstance(op, dict):
+        raw_step = op.get("step") or op.get("Step")
+        raw_desc = op.get("description") or op.get("Description")
+        raw_impact = op.get("impact") or op.get("Impact")
+        raw_cols = op.get("affected_columns") or op.get("Affected Columns")
+        raw_rows = op.get("rows_affected") if "rows_affected" in op else op.get("Rows Affected")
+        raw_ts = op.get("timestamp") or op.get("Timestamp")
+
+        if not raw_step:
+            warning = "Cleaning operation dictionary is missing a 'step' field."
+            step_str = "Unknown Step"
+        else:
+            step_str = str(raw_step).replace("_", " ").strip().title()
+
+        desc_str = str(raw_desc).strip() if raw_desc else "No description provided"
+        impact_str = str(raw_impact).strip() if raw_impact else "-"
+
+        if isinstance(raw_cols, (list, tuple, set)):
+            cols_str = ", ".join(str(c) for c in raw_cols if str(c).strip()) if raw_cols else "All"
+        elif isinstance(raw_cols, str) and raw_cols.strip():
+            cols_str = raw_cols.strip()
+        else:
+            cols_str = "All"
+
+        try:
+            rows_num = int(raw_rows) if raw_rows is not None else 0
+        except (ValueError, TypeError):
+            rows_num = 0
+            warning = f"Operation '{step_str}' had non-integer rows_affected: {raw_rows}"
+
+        if raw_ts and isinstance(raw_ts, str) and len(raw_ts) >= 19:
+            ts_str = raw_ts[:19].replace("T", " ")
+        elif raw_ts:
+            ts_str = str(raw_ts)
+        else:
+            ts_str = "-"
+
+        return {
+            "Step": step_str,
+            "Description": desc_str,
+            "Impact": impact_str,
+            "Rows Affected": rows_num,
+            "Affected Columns": cols_str,
+            "Timestamp": ts_str,
+        }, warning
+
+    # Handle arbitrary object or unexpected type
+    step_val = getattr(op, "step", None) or getattr(op, "name", "Malformed Operation")
+    desc_val = getattr(op, "description", None) or str(op)
+    impact_val = getattr(op, "impact", "-")
+    cols_val = getattr(op, "affected_columns", "All")
+    rows_val = getattr(op, "rows_affected", 0)
+    ts_val = getattr(op, "timestamp", "-")
+
+    cols_str = ", ".join(cols_val) if isinstance(cols_val, (list, tuple, set)) else str(cols_val)
+    try:
+        rows_num = int(rows_val)
+    except (ValueError, TypeError):
+        rows_num = 0
+
+    return {
+        "Step": str(step_val).replace("_", " ").strip().title(),
+        "Description": str(desc_val),
+        "Impact": str(impact_val),
+        "Rows Affected": rows_num,
+        "Affected Columns": cols_str,
+        "Timestamp": str(ts_val)[:19].replace("T", " ") if isinstance(ts_val, str) else "-",
+    }, f"Non-standard cleaning operation entry: {type(op).__name__}"
 
 
 @dataclass
@@ -66,7 +209,23 @@ class IngestResult:
 
     @property
     def cleaning_operations(self) -> list[dict[str, Any]]:
-        return [op.to_dict() for op in self.cleaning_log]
+        return [op.to_dict() if hasattr(op, "to_dict") else CleaningOperation.from_dict(op).to_dict() for op in self.cleaning_log]
+
+    @cleaning_operations.setter
+    def cleaning_operations(self, ops: list[Any]) -> None:
+        self.cleaning_log = [
+            op if isinstance(op, CleaningOperation) else CleaningOperation.from_dict(op)
+            for op in (ops or [])
+        ]
+
+    def add_cleaning_operation(self, op: CleaningOperation | dict[str, Any] | Any) -> None:
+        """Safely record a cleaning operation whether provided as a dataclass, dict, or raw record."""
+        if isinstance(op, CleaningOperation):
+            self.cleaning_log.append(op)
+        elif isinstance(op, dict):
+            self.cleaning_log.append(CleaningOperation.from_dict(op))
+        else:
+            self.cleaning_log.append(CleaningOperation.from_dict({"description": str(op)}))
 
 
 def inspect_workbook(data: bytes, filename: str) -> WorkbookInfo | None:

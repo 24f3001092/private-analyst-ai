@@ -16,8 +16,10 @@ from private_analyst.analytics.statistics import (
 )
 from private_analyst.config import Limits
 from private_analyst.ingestion.loader import (
+    CleaningOperation,
     apply_transformations,
     load_tabular,
+    normalize_cleaning_operation,
     parse_currency,
     parse_numeric_range,
     parse_percentage,
@@ -213,3 +215,232 @@ def test_operations_correlation_and_trend(limits: Limits) -> None:
     res_trend = run_operation(ingest, "what is the time trend over day for val_a")
     assert res_trend.intent == "trend"
     assert res_trend.status == "ok"
+
+
+def test_cleaning_ledger_object_based_operations() -> None:
+    op = CleaningOperation(
+        step="drop_empty_rows",
+        description="Dropped 4 completely blank rows",
+        impact="Reduced table noise",
+        affected_columns=["A", "B"],
+        rows_affected=4,
+    )
+    row, warn = normalize_cleaning_operation(op)
+
+    assert warn is None
+    assert row["Step"] == "Drop Empty Rows"
+    assert row["Description"] == "Dropped 4 completely blank rows"
+    assert row["Impact"] == "Reduced table noise"
+    assert row["Rows Affected"] == 4
+    assert row["Affected Columns"] == "A, B"
+    assert row["Timestamp"] != "-"
+
+
+def test_cleaning_ledger_dict_based_operations() -> None:
+    # Standard lowercase dictionary keys (as produced by to_dict() / JSON)
+    dict_op = {
+        "step": "header_selection",
+        "description": "Selected row 3 as header row",
+        "impact": "Skipped 2 introductory rows",
+        "affected_columns": ["Title", "Notes"],
+        "rows_affected": 2,
+        "timestamp": "2026-10-18T12:30:00.000000Z",
+    }
+    row, warn = normalize_cleaning_operation(dict_op)
+
+    assert warn is None
+    assert row["Step"] == "Header Selection"
+    assert row["Description"] == "Selected row 3 as header row"
+    assert row["Impact"] == "Skipped 2 introductory rows"
+    assert row["Rows Affected"] == 2
+    assert row["Affected Columns"] == "Title, Notes"
+    assert "2026-10-18 12:30:00" in row["Timestamp"]
+
+    # Title-case dictionary keys
+    title_dict = {
+        "Step": "strip_whitespace",
+        "Description": "Trimmed leading spaces",
+        "Impact": "Clean strings",
+        "Affected Columns": ["col_1"],
+        "Rows Affected": 10,
+    }
+    row2, warn2 = normalize_cleaning_operation(title_dict)
+    assert warn2 is None
+    assert row2["Step"] == "Strip Whitespace"
+    assert row2["Rows Affected"] == 10
+
+
+def test_cleaning_ledger_missing_and_invalid_fields() -> None:
+    # Missing 'step' key
+    missing_step = {
+        "description": "Operation without step identifier",
+        "impact": "Unknown impact",
+    }
+    row1, warn1 = normalize_cleaning_operation(missing_step)
+    assert row1["Step"] == "Unknown Step"
+    assert row1["Description"] == "Operation without step identifier"
+    assert warn1 is not None
+
+    # Missing all optional fields
+    bare_op = {"step": "bare_operation"}
+    row2, warn2 = normalize_cleaning_operation(bare_op)
+    assert warn2 is None
+    assert row2["Step"] == "Bare Operation"
+    assert row2["Description"] == "No description provided"
+    assert row2["Impact"] == "-"
+    assert row2["Rows Affected"] == 0
+    assert row2["Affected Columns"] == "All"
+    assert row2["Timestamp"] == "-"
+
+    # Invalid non-integer rows_affected
+    invalid_rows = {
+        "step": "corrupt_count",
+        "rows_affected": "not-a-number",
+    }
+    row3, warn3 = normalize_cleaning_operation(invalid_rows)
+    assert row3["Rows Affected"] == 0
+    assert warn3 is not None
+
+    # None input
+    row_none, warn_none = normalize_cleaning_operation(None)
+    assert row_none["Step"] == "Unknown Step"
+    assert warn_none is not None
+
+
+def test_cleaning_ledger_malformed_entries() -> None:
+    # Raw string entry
+    row_str, warn_str = normalize_cleaning_operation("Some unstructured log message")
+    assert row_str["Step"] == "Malformed Operation"
+    assert "Some unstructured log message" in row_str["Description"]
+    assert warn_str is not None
+
+    # Arbitrary object
+    class CustomOp:
+        def __init__(self):
+            self.step = "custom_step"
+            self.description = "Custom description"
+            self.impact = "Custom impact"
+            self.rows_affected = 5
+
+    row_obj, warn_obj = normalize_cleaning_operation(CustomOp())
+    assert row_obj["Step"] == "Custom Step"
+    assert row_obj["Rows Affected"] == 5
+
+
+def test_cleaning_ledger_empty() -> None:
+    ledger_rows = [normalize_cleaning_operation(op)[0] for op in []]
+    assert len(ledger_rows) == 0
+
+
+def test_ingest_result_cleaning_helpers(limits: Limits) -> None:
+    df = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    ingest = load_tabular(csv_bytes, "test.csv", limits)
+
+    initial_count = len(ingest.cleaning_log)
+
+    # Add via CleaningOperation object
+    ingest.add_cleaning_operation(CleaningOperation(
+        step="manual_filter",
+        description="Filtered test rows",
+        impact="Reduced test rows",
+    ))
+    assert len(ingest.cleaning_log) == initial_count + 1
+
+    # Add via dict
+    ingest.add_cleaning_operation({
+        "step": "manual_rename",
+        "description": "Renamed A to Alpha",
+        "impact": "Better naming",
+    })
+    assert len(ingest.cleaning_log) == initial_count + 2
+
+    # Verify cleaning_operations property returns list of dicts
+    ops = ingest.cleaning_operations
+    assert isinstance(ops, list)
+    assert len(ops) == initial_count + 2
+    assert isinstance(ops[-1], dict)
+    assert ops[-1]["step"] == "manual_rename"
+
+    # Verify property setter
+    ingest.cleaning_operations = [{"step": "reset_step", "description": "Reset op"}]
+    assert len(ingest.cleaning_log) == 1
+    assert ingest.cleaning_log[0].step == "reset_step"
+
+
+def test_ui_import_tab_simulation_prevents_dict_attribute_error() -> None:
+    """Simulate the exact UI loop in _import_tab() with mixed dict and object entries to verify no crash."""
+    ops = [
+        # Dataclass instance
+        CleaningOperation(
+            step="override_header_row",
+            description="Promoted row 2 to headers",
+            impact="Reindexed",
+            rows_affected=2,
+        ),
+        # Standard dict (the exact case that previously triggered AttributeError: 'dict' object has no attribute 'step')
+        {
+            "step": "drop_empty_rows",
+            "description": "Dropped 10 empty rows",
+            "impact": "Clean data",
+            "rows_affected": 10,
+            "affected_columns": ["col1", "col2"],
+        },
+        # Dict with missing fields
+        {
+            "step": "repair_headers",
+        },
+        # Dict with no step
+        {
+            "description": "Orphan description",
+        },
+        # Raw string entry
+        "Unexpected string entry",
+    ]
+
+    ledger_rows = []
+    warnings = []
+    for op in ops:
+        row, warn = normalize_cleaning_operation(op)
+        ledger_rows.append(row)
+        if warn:
+            warnings.append(warn)
+
+    assert len(ledger_rows) == 5
+    ledger_df = pd.DataFrame(ledger_rows)
+    assert not ledger_df.empty
+    assert list(ledger_df.columns) == [
+        "Step",
+        "Description",
+        "Impact",
+        "Rows Affected",
+        "Affected Columns",
+        "Timestamp",
+    ]
+    # Check that Step was title-cased and did not crash on dict
+    assert ledger_df.iloc[0]["Step"] == "Override Header Row"
+    assert ledger_df.iloc[1]["Step"] == "Drop Empty Rows"
+    assert ledger_df.iloc[2]["Step"] == "Repair Headers"
+    assert ledger_df.iloc[3]["Step"] == "Unknown Step"
+    assert ledger_df.iloc[4]["Step"] == "Malformed Operation"
+    assert len(warnings) >= 2
+
+
+def test_to_report_excel_bytes_includes_cleaning_ledger(limits: Limits) -> None:
+    df = pd.DataFrame({"X": [10, 20], "Y": [30, 40]})
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    ingest = load_tabular(csv_bytes, "test.csv", limits)
+    ingest.add_cleaning_operation(CleaningOperation(
+        step="test_cleaning_step",
+        description="Audit test operation",
+        impact="Test impact",
+    ))
+
+    excel_bytes = to_report_excel_bytes(ingest)
+    xls = pd.ExcelFile(io.BytesIO(excel_bytes))
+    assert "Cleaned Data" in xls.sheet_names
+    assert "Cleaning Ledger" in xls.sheet_names
+    ledger_sheet = pd.read_excel(xls, sheet_name="Cleaning Ledger")
+    assert not ledger_sheet.empty
+    assert "Step" in ledger_sheet.columns
+    assert "Test Cleaning Step" in ledger_sheet["Step"].values
