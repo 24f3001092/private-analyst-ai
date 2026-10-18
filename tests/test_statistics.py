@@ -47,3 +47,42 @@ def test_missing_values_excluded_from_mean() -> None:
     assert col.missing == 1
     assert col.mean == 2.0
     assert col.count == 2
+
+
+def test_categorical_column_statistics_and_frequency() -> None:
+    from private_analyst.analytics.statistics import frequency_analysis
+
+    df = pd.DataFrame({
+        "mode": ["Online", "Online", "Online", "In-Person", "In-Person"],
+        "domain": ["AI", "AI", "Open Source", "Robotics", "AI"],
+    })
+    stats = compute_dataset_stats(df)
+    mode_col = next(c for c in stats.columns if c.name == "mode")
+    assert mode_col.kind == "categorical"
+    assert mode_col.unique == 2
+    assert mode_col.top_value == "Online"
+    assert mode_col.top_freq == 3
+
+    freq = frequency_analysis(df, "mode")
+    assert list(freq["Category"]) == ["Online", "In-Person"]
+    assert list(freq["Count"]) == [3, 2]
+    assert list(freq["Percentage (%)"]) == [60.0, 40.0]
+    assert list(freq["Cumulative (%)"]) == [60.0, 100.0]
+
+
+def test_quality_scoring_comprehensive() -> None:
+    from private_analyst.analytics.quality import assess_quality
+
+    df_perfect = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+    q_perf = assess_quality(df_perfect)
+    assert q_perf.quality_score == 100.0
+    assert q_perf.grade == "Excellent"
+    assert q_perf.score_breakdown["completeness"] == 100.0
+    assert q_perf.total_missing_cells == 0
+    assert q_perf.completeness_ratio == 1.0
+
+    df_flawed = pd.DataFrame({"a": [1, 1, None], "b": ["x", "x", None]})
+    q_flawed = assess_quality(df_flawed)
+    assert q_flawed.quality_score < 100.0
+    assert q_flawed.duplicate_row_count == 1
+    assert q_flawed.grade in {"Good", "Fair", "Needs Attention"}

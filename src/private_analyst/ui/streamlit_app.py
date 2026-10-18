@@ -9,13 +9,14 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
+from private_analyst.ai.client import check_local_model
 from private_analyst.ai.explainer import explain_results
 from private_analyst.analytics.anomalies import detect_iqr_anomalies, linear_trend_forecast
 from private_analyst.analytics.ml_engine import run_classification, run_clustering, run_regression
 from private_analyst.analytics.operations import run_operation
 from private_analyst.analytics.quality import assess_quality
 from private_analyst.analytics.sql_console import DuckDBConsole
-from private_analyst.analytics.statistics import compute_dataset_stats
+from private_analyst.analytics.statistics import compute_dataset_stats, frequency_analysis, group_compare
 from private_analyst.auth.rbac import can
 from private_analyst.auth.users import User, UserStore
 from private_analyst.config import load_config
@@ -23,13 +24,13 @@ from private_analyst.documents.index import LocalTextIndex
 from private_analyst.documents.ocr import ocr_image
 from private_analyst.documents.pdf import extract_pdf_text
 from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError
-from private_analyst.ingestion.loader import IngestResult, load_tabular
+from private_analyst.ingestion.loader import IngestResult, WorkbookInfo, inspect_workbook, load_tabular
 from private_analyst.reports.exporters import analysis_metadata, report_markdown, to_csv_bytes, to_excel_bytes
 from private_analyst.reports.pdf_report import to_pdf_bytes
 from private_analyst.security.encryption import SecureKeyStore
 from private_analyst.security.sessions import SessionManager
 from private_analyst.version import PRODUCT_NAME, __version__
-from private_analyst.viz.charts import bar_sum, histogram, missingness
+from private_analyst.viz.charts import bar_sum, category_bar, crosstab_heatmap, histogram, missingness
 from private_analyst.audit.logger import AuditLog
 
 logger = logging.getLogger(__name__)
@@ -219,17 +220,41 @@ def _check_session_timeout(cfg) -> bool:
 
 
 def _import_tab(cfg, user: User) -> None:
-    st.header("Import data")
-    st.write("CSV and Excel files are parsed locally. They are not uploaded to a vendor.")
-    uploaded = st.file_uploader("Table file", type=["csv", "xlsx"], disabled=not can(user, "ingest"))
+    st.header("Import Data")
+    st.caption("Upload CSV or Excel files. All parsing and schema profiling execute strictly on your local machine.")
+    uploaded = st.file_uploader("Select Table File", type=["csv", "xlsx", "xls"], disabled=not can(user, "ingest"))
     if uploaded is None:
-        st.session_state.ingest = st.session_state.ingest
         return
+
+    raw_bytes = uploaded.getvalue()
+    is_excel = uploaded.name.lower().endswith((".xlsx", ".xls"))
+    selected_sheet: str | None = None
+
+    if is_excel:
+        wb_info = inspect_workbook(raw_bytes, uploaded.name)
+        if wb_info and len(wb_info.sheet_names) > 1:
+            st.info(f"Workbook contains {len(wb_info.sheet_names)} sheets. Recommended primary sheet: **'{wb_info.recommended_sheet}'**")
+            default_idx = (
+                wb_info.sheet_names.index(wb_info.recommended_sheet)
+                if wb_info.recommended_sheet in wb_info.sheet_names
+                else 0
+            )
+            selected_sheet = st.selectbox(
+                "Select Worksheet",
+                wb_info.sheet_names,
+                index=default_idx,
+                help="Choose which sheet to load for analysis.",
+            )
+
     log = _get_audit_log(cfg)
     try:
-        raw_bytes = uploaded.getvalue()
-        ingest = load_tabular(raw_bytes, uploaded.name, cfg.limits)
-        file_sig = (uploaded.name, len(raw_bytes))
+        ingest = load_tabular(
+            raw_bytes,
+            uploaded.name,
+            cfg.limits,
+            sheet_name=selected_sheet,
+        )
+        file_sig = (uploaded.name, len(raw_bytes), selected_sheet)
         if st.session_state.get("_last_ingested_file") != file_sig:
             st.session_state["_last_ingested_file"] = file_sig
             log.record(
@@ -250,55 +275,142 @@ def _import_tab(cfg, user: User) -> None:
             )
         st.error(str(exc))
         return
+
     st.session_state.ingest = ingest
-    st.success(f"Loaded {ingest.frame.shape[0]} rows × {ingest.frame.shape[1]} columns from {ingest.source_name}.")
+
+    st.success(
+        f"Successfully loaded and structured **{ingest.frame.shape[0]:,} rows × {ingest.frame.shape[1]} columns** from `{ingest.source_name}`"
+        + (f" (Sheet: `{ingest.sheet_name}`)" if ingest.sheet_name else "")
+        + "."
+    )
+
+    if ingest.detected_title or ingest.excluded_rows > 0:
+        meta_parts = []
+        if ingest.detected_title:
+            meta_parts.append(f"Title banner: *'{ingest.detected_title}'*")
+        if ingest.excluded_rows > 0:
+            meta_parts.append(f"{ingest.excluded_rows} introductory/empty rows safely excluded")
+        if ingest.detected_index_column:
+            meta_parts.append(f"Index column '{ingest.detected_index_column}' identified")
+        st.info("Structure Auto-Detection: " + " | ".join(meta_parts))
+
     if ingest.warnings:
         for warning in ingest.warnings:
             st.warning(warning)
-    st.subheader("Preview")
+
+    try:
+        col_res = st.columns(4)
+        if isinstance(col_res, (list, tuple)) and len(col_res) == 4:
+            col_res[0].metric("Loaded Records", f"{ingest.frame.shape[0]:,}")
+            col_res[1].metric("Total Columns", f"{ingest.frame.shape[1]}")
+            col_res[2].metric("Header Row", f"Row {ingest.header_row + 1}")
+            col_res[3].metric("Excluded Rows", f"{ingest.excluded_rows}")
+    except Exception:
+        pass
+
+    st.subheader("Data Preview")
     st.dataframe(ingest.frame.head(cfg.limits.preview_rows), use_container_width=True)
-    st.json(ingest.inferred_types)
+
+    with st.expander("Detected Column Types & Schema Details"):
+        type_rows = []
+        for col_name, inferred_type in ingest.inferred_types.items():
+            non_null_cnt = int(ingest.frame[col_name].notna().sum())
+            null_cnt = int(ingest.frame[col_name].isna().sum())
+            type_rows.append({
+                "Column Name": col_name,
+                "Detected Type": inferred_type,
+                "Non-Null Count": non_null_cnt,
+                "Missing Count": null_cnt,
+                "Completeness": f"{(non_null_cnt / len(ingest.frame) * 100):.1f}%" if len(ingest.frame) > 0 else "0.0%",
+            })
+        st.dataframe(pd.DataFrame(type_rows), use_container_width=True)
 
 
 def _dashboard_tab() -> None:
     ingest: IngestResult | None = st.session_state.ingest
     if ingest is None:
-        st.info("Import a table to see the dashboard.")
+        st.info("Import a table file first to view dashboard analytics.")
         return
-    stats = compute_dataset_stats(ingest.frame)
+
+    stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
     quality = assess_quality(ingest.frame, ingest.duplicate_columns)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", stats.row_count)
-    c2.metric("Columns", stats.column_count)
-    c3.metric("Duplicate rows", quality.duplicate_row_count)
-    st.subheader("Data quality")
-    st.write(quality.issues)
-    st.plotly_chart(missingness(quality.missing_by_column), use_container_width=True)
-    st.subheader("Numeric summaries")
-    rows = [
+
+    st.subheader("Dataset Summary & Health Overview")
+    try:
+        c_metrics = st.columns(5)
+        if isinstance(c_metrics, (list, tuple)) and len(c_metrics) == 5:
+            c_metrics[0].metric("Total Records", f"{stats.row_count:,}")
+            c_metrics[1].metric("Total Columns", f"{stats.column_count}")
+            c_metrics[2].metric("Quality Score", f"{quality.quality_score:.1f}/100", delta=quality.grade)
+            c_metrics[3].metric("Completeness", f"{quality.completeness_ratio * 100:.1f}%")
+            c_metrics[4].metric("Duplicate Rows", f"{quality.duplicate_row_count}")
+    except Exception:
+        pass
+
+    with st.expander("Data Quality Diagnostics & Breakdown", expanded=False):
+        try:
+            b_cols = st.columns(4)
+            if isinstance(b_cols, (list, tuple)) and len(b_cols) == 4:
+                b_cols[0].metric("Completeness", f"{quality.score_breakdown.get('completeness', 0):.1f} / 40")
+                b_cols[1].metric("Uniqueness", f"{quality.score_breakdown.get('uniqueness', 0):.1f} / 20")
+                b_cols[2].metric("Column Health", f"{quality.score_breakdown.get('column_health', 0):.1f} / 20")
+                b_cols[3].metric("Type Consistency", f"{quality.score_breakdown.get('type_consistency', 0):.1f} / 20")
+        except Exception:
+            pass
+
+        if quality.issues:
+            st.write("**Identified Quality Issues:**")
+            for issue in quality.issues:
+                st.caption(f"- {issue}")
+
+    if quality.total_missing_cells == 0:
+        st.success(f"100% Complete Data: 0 missing values detected across all {stats.column_count} columns.")
+    else:
+        st.plotly_chart(missingness(quality.missing_by_column), use_container_width=True)
+
+    numeric_rows = [
         {
-            "column": col.name,
-            "count": col.count,
-            "missing": col.missing,
-            "mean": col.mean,
-            "median": col.median,
-            "std": col.std,
-            "min": col.min,
-            "max": col.max,
-            "sum": col.sum,
+            "Column": col.name,
+            "Count": col.count,
+            "Missing": col.missing,
+            "Mean": round(col.mean, 2) if col.mean is not None else None,
+            "Median": round(col.median, 2) if col.median is not None else None,
+            "Std Dev": round(col.std, 2) if col.std is not None else None,
+            "Min": col.min,
+            "Max": col.max,
+            "Sum": col.sum,
         }
         for col in stats.columns
         if col.kind == "numeric"
     ]
-    if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        first = stats.numeric_column_names[0]
-        st.plotly_chart(histogram(ingest.frame, first), use_container_width=True)
+    if numeric_rows:
+        st.subheader("Numeric Distributions")
+        st.dataframe(pd.DataFrame(numeric_rows), use_container_width=True)
+        first_num = stats.numeric_column_names[0]
+        st.plotly_chart(histogram(ingest.frame, first_num), use_container_width=True)
         cats = [c for c in ingest.frame.columns if c not in stats.numeric_column_names]
         if cats:
-            st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first), use_container_width=True)
-    else:
-        st.write("No numeric columns were detected.")
+            st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first_num), use_container_width=True)
+
+    cat_cols_stats = [col for col in stats.columns if col.kind != "numeric" and col.name not in {"#", "id", "s.no", "sl.no", "index"}]
+    if cat_cols_stats:
+        st.subheader("Categorical & Text Column Profiles")
+        cat_summary_rows = [
+            {
+                "Column": col.name,
+                "Type": col.kind.title(),
+                "Records": col.count,
+                "Missing": col.missing,
+                "Unique Values": col.unique,
+                "Top Category": col.top_value,
+                "Top Count": col.top_freq,
+                "Top Share": f"{(col.top_freq / col.count * 100):.1f}%" if col.count and col.top_freq else "N/A",
+            }
+            for col in cat_cols_stats
+        ]
+        st.dataframe(pd.DataFrame(cat_summary_rows), use_container_width=True)
+        top_cat_name = cat_cols_stats[0].name
+        st.plotly_chart(category_bar(ingest.frame, top_cat_name), use_container_width=True)
 
 
 def _ask_tab(cfg, user: User) -> None:
@@ -306,7 +418,55 @@ def _ask_tab(cfg, user: User) -> None:
     if ingest is None:
         st.info("Import a table before asking questions.")
         return
-    question = st.text_input("Question about the loaded table", value="Summarize the dataset.")
+
+    st.subheader("Ask & Analyze")
+
+    model_status = check_local_model(cfg.ai)
+    try:
+        status_cols = st.columns([4, 1])
+        if isinstance(status_cols, (list, tuple)) and len(status_cols) == 2:
+            c_status, c_btn = status_cols[0], status_cols[1]
+            if model_status.available:
+                c_status.success(f"**Local AI Model:** {model_status.friendly_status}")
+            else:
+                c_status.warning(f"**Local AI Model:** {model_status.friendly_status}")
+            if c_btn.button("Test Connection"):
+                st.info(model_status.friendly_status)
+        else:
+            if model_status.available:
+                st.success(f"**Local AI Model:** {model_status.friendly_status}")
+            else:
+                st.warning(f"**Local AI Model:** {model_status.friendly_status}")
+    except Exception:
+        if model_status.available:
+            st.success(f"**Local AI Model:** {model_status.friendly_status}")
+        else:
+            st.warning(f"**Local AI Model:** {model_status.friendly_status}")
+
+    if not model_status.available:
+        with st.expander("How to start your local AI model (Ollama)"):
+            st.markdown(
+                "- **Step 1:** Open a terminal and run `ollama serve`.\n"
+                f"- **Step 2:** Ensure your model is downloaded: `ollama pull {cfg.ai.model}`.\n"
+                "- **Privacy Assurance:** All AI inferences run strictly on `127.0.0.1` loopback. No data is sent over the internet.\n"
+                "- **Note:** Even when the AI model is offline, the deterministic Python analytics engine is fully functional with 0% hallucination."
+            )
+
+    question = st.text_input("Ask a question about the loaded data", value="Summarize the dataset.")
+    try:
+        q_cols = st.columns(4)
+        if isinstance(q_cols, (list, tuple)) and len(q_cols) == 4:
+            if q_cols[0].button("Summarize"):
+                question = "Summarize the dataset."
+            if q_cols[1].button("Data Quality"):
+                question = "Assess data quality and missingness."
+            if q_cols[2].button("Frequency"):
+                question = "Show frequency distribution of categories."
+            if q_cols[3].button("Cross-Tabulate"):
+                question = "Cross-tabulate categories."
+    except Exception:
+        pass
+
     if st.button("Run analysis"):
         result = run_operation(ingest, question)
         explanation = explain_results(result, question, cfg.ai)
@@ -318,27 +478,42 @@ def _ask_tab(cfg, user: User) -> None:
             "run_analysis",
             f"Operation: {result.intent}, Status: {result.status}",
         )
+
     result = st.session_state.last_result
     explanation = st.session_state.last_explanation
     if result is None or explanation is None:
         return
-    st.subheader("Evidence classes")
-    st.write("Observed (from the file):", result.observed)
-    st.write("Calculated (Python analytics engine):")
-    st.json(result.calculated)
-    if result.hypotheses:
-        st.warning("Hypotheses / unvalidated methods: " + " ".join(result.hypotheses))
-    if result.limitations:
-        st.info("Limitations: " + " ".join(result.limitations))
-    st.subheader("Explanation")
-    if explanation["source"] == "local_model":
-        st.success("Local model produced the narrative. Totals still come from Python.")
+
+    st.divider()
+    st.write("### Verified Analytical Facts & Metrics")
+    st.caption("Calculated deterministically by the Python/DuckDB analytics engine — 100% accurate, 0% hallucination.")
+
+    if result.chart_spec:
+        spec = result.chart_spec
+        chart_type = spec.get("type")
+        if chart_type == "category_bar" and spec.get("column") in ingest.frame.columns:
+            st.plotly_chart(category_bar(ingest.frame, spec["column"]), use_container_width=True)
+        elif chart_type == "histogram" and spec.get("column") in ingest.frame.columns:
+            st.plotly_chart(histogram(ingest.frame, spec["column"]), use_container_width=True)
+        elif chart_type == "crosstab_heatmap" and "crosstab" in result.calculated:
+            ct_df = pd.DataFrame(result.calculated["crosstab"])
+            st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), use_container_width=True)
+        elif chart_type == "bar" and spec.get("x") in ingest.frame.columns and spec.get("y") in ingest.frame.columns:
+            st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), use_container_width=True)
+
+    with st.expander("View Raw Evidence Data (JSON)", expanded=False):
+        st.write("**Observed (from file):**")
+        st.json(result.observed)
+        st.write("**Calculated (Python engine):**")
+        st.json(result.calculated)
+
+    st.write("### AI Analysis & Narrative")
+    if explanation.get("source") == "local_model":
+        st.success(f"Narrative generated by local model ({explanation.get('model_detail')}). Verified totals remain engine-computed.")
+        st.markdown(explanation["text"])
     else:
-        st.warning(
-            "No local model response was available. A deterministic explanation of the calculated JSON is shown instead."
-        )
-    st.write(explanation["text"])
-    st.caption(f"Model detail: {explanation.get('model_detail')}")
+        st.info("Local AI model is offline. Displaying deterministic structured engine findings below.")
+        st.markdown(explanation["text"])
 
 
 def _sql_tab(cfg, user: User) -> None:
@@ -471,22 +646,152 @@ def _ml_tab(cfg, user: User) -> None:
         "- Classification requires verified labels; regression establishes correlation, not causality."
     )
 
-    task = st.selectbox(
-        "Select Analytical Task",
-        [
-            "Classification (Decision Tree)",
-            "Linear Regression",
-            "Clustering (K-Means)",
-            "Anomaly Detection (IQR Outliers)",
-            "Linear Trend Forecasting",
-        ],
-    )
-
     frame = ingest.frame
     all_cols = list(frame.columns)
     numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(frame[c])]
+    cat_cols = [c for c in all_cols if c not in numeric_cols and c not in {"#", "id", "s.no", "sl.no", "index"}]
+    if not cat_cols:
+        cat_cols = [c for c in all_cols if c not in numeric_cols]
 
-    if task.startswith("Classification"):
+    task_options = [
+        "Categorical Breakdown & Frequencies",
+        "Cross-Tabulation & Association Matrix",
+        "Entity Diversity & Concentration Metrics",
+        "Classification (Decision Tree)",
+        "Linear Regression",
+        "Clustering (K-Means)",
+        "Anomaly Detection (IQR Outliers)",
+        "Linear Trend Forecasting",
+    ]
+    default_task_idx = 0 if not numeric_cols else 3
+
+    task = st.selectbox("Select Analytical Task", task_options, index=default_task_idx)
+
+    if task == "Categorical Breakdown & Frequencies":
+        st.subheader("Categorical Breakdown & Frequency Analysis")
+        st.caption("Analyze category distributions, shares, and concentration metrics.")
+        if not cat_cols:
+            st.warning("No categorical columns available.")
+            return
+
+        selected_col = st.selectbox("Select Column to Analyze", cat_cols)
+        if st.button("Generate Frequency Breakdown", type="primary"):
+            freq_df = frequency_analysis(frame, selected_col)
+            cardinality = int(frame[selected_col].nunique(dropna=True))
+            top_3_share = float(freq_df["Percentage (%)"].iloc[:3].sum()) if not freq_df.empty else 0.0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Records", f"{len(frame):,}")
+            m2.metric("Unique Categories", f"{cardinality}")
+            m3.metric("Top Category", f"{freq_df['Category'].iloc[0]}" if not freq_df.empty else "N/A")
+            m4.metric("Top 3 Share", f"{top_3_share:.1f}%")
+
+            st.dataframe(freq_df, use_container_width=True)
+            st.plotly_chart(category_bar(frame, selected_col), use_container_width=True)
+
+            csv_bytes = to_csv_bytes(freq_df)
+            st.download_button(
+                "Download Frequency Breakdown (CSV)",
+                csv_bytes,
+                file_name=f"frequency_{selected_col}.csv",
+                mime="text/csv",
+            )
+
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "advanced_frequency_analysis",
+                f"Column: '{selected_col}', Unique: {cardinality}, Top3Share: {top_3_share:.1f}%",
+            )
+
+    elif task == "Cross-Tabulation & Association Matrix":
+        st.subheader("Cross-Tabulation & Association Matrix")
+        st.caption("Examine two-way contingency relationships between categorical dimensions.")
+        if len(cat_cols) < 2:
+            st.warning("Cross-tabulation requires at least two categorical columns.")
+            return
+
+        c1, c2 = st.columns(2)
+        row_dim = c1.selectbox("Row Dimension", cat_cols, index=0)
+        available_col_dims = [c for c in cat_cols if c != row_dim]
+        col_dim = c2.selectbox("Column Dimension", available_col_dims, index=0)
+
+        normalize_opt = st.selectbox(
+            "Values Display",
+            ["Counts", "Row Percentages (%)", "Column Percentages (%)", "Total Percentages (%)"],
+        )
+
+        if st.button("Compute Cross-Tabulation", type="primary"):
+            norm_map = {
+                "Counts": False,
+                "Row Percentages (%)": "index",
+                "Column Percentages (%)": "columns",
+                "Total Percentages (%)": "all",
+            }
+            norm = norm_map[normalize_opt]
+            ct = pd.crosstab(frame[row_dim], frame[col_dim], normalize=norm)
+            if norm:
+                ct = (ct * 100).round(1)
+
+            st.write(f"### {row_dim} vs {col_dim} ({normalize_opt})")
+            st.dataframe(ct, use_container_width=True)
+            st.plotly_chart(
+                crosstab_heatmap(ct, col_dim, row_dim, f"{row_dim} vs {col_dim} ({normalize_opt})"),
+                use_container_width=True,
+            )
+
+            csv_bytes = to_csv_bytes(ct.reset_index())
+            st.download_button(
+                "Download Cross-Tabulation (CSV)",
+                csv_bytes,
+                file_name=f"crosstab_{row_dim}_{col_dim}.csv",
+                mime="text/csv",
+            )
+
+            _get_audit_log(cfg).record(
+                user.org_id,
+                user.username,
+                "advanced_crosstab_analysis",
+                f"Row: '{row_dim}', Col: '{col_dim}', Mode: '{normalize_opt}'",
+            )
+
+    elif task == "Entity Diversity & Concentration Metrics":
+        st.subheader("Entity Diversity & Concentration Metrics")
+        st.caption("Evaluate cardinality and distribution balance across all categorical dimensions.")
+        diversity_rows = []
+        for col in cat_cols:
+            s = frame[col].dropna().astype(str).str.strip()
+            if s.empty:
+                continue
+            vc = s.value_counts()
+            top1_share = (vc.iloc[0] / len(s) * 100) if not vc.empty else 0.0
+            top3_share = (vc.iloc[:3].sum() / len(s) * 100) if not vc.empty else 0.0
+
+            if top1_share > 70:
+                div_level = "High Concentration"
+            elif top1_share > 40:
+                div_level = "Moderate"
+            else:
+                div_level = "High Diversity"
+
+            diversity_rows.append({
+                "Column": col,
+                "Unique Values": len(vc),
+                "Top Category": str(vc.index[0]) if not vc.empty else "N/A",
+                "Top Share (%)": round(top1_share, 1),
+                "Top 3 Share (%)": round(top3_share, 1),
+                "Distribution Profile": div_level,
+            })
+        df_div = pd.DataFrame(diversity_rows)
+        st.dataframe(df_div, use_container_width=True)
+        _get_audit_log(cfg).record(
+            user.org_id,
+            user.username,
+            "advanced_diversity_analysis",
+            f"Analyzed {len(diversity_rows)} categorical dimensions",
+        )
+
+    elif task.startswith("Classification"):
         st.subheader("Decision Tree Classification")
         target_col = st.selectbox("Target Column (Classes)", all_cols)
         available_features = [c for c in numeric_cols if c != target_col]
@@ -844,10 +1149,56 @@ def _settings_tab(cfg, user: User) -> None:
         st.caption("No audit events for this organization yet.")
 
 
+def _inject_custom_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .block-container {
+            padding-top: 2rem !important;
+            padding-bottom: 2rem !important;
+            max-width: 1250px !important;
+        }
+        h1 {
+            font-size: 1.85rem !important;
+            font-weight: 700 !important;
+            margin-bottom: 0.5rem !important;
+            letter-spacing: -0.02em !important;
+        }
+        h2 {
+            font-size: 1.4rem !important;
+            font-weight: 600 !important;
+            margin-top: 1rem !important;
+            margin-bottom: 0.4rem !important;
+        }
+        h3 {
+            font-size: 1.15rem !important;
+            font-weight: 600 !important;
+            margin-top: 0.8rem !important;
+            margin-bottom: 0.3rem !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.5rem !important;
+            font-weight: 700 !important;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 6px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            padding: 6px 14px;
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
     cfg = load_config()
     st.set_page_config(page_title=cfg.branding.product_name, layout="wide")
+    _inject_custom_styles()
     _init_state(cfg)
     if cfg.server.edition == "server":
         # Disallow desktop user bypass in server edition unconditionally

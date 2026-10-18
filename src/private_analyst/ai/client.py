@@ -19,6 +19,45 @@ class ModelStatus:
     host: str
     model: str
     detail: str
+    port: int = 11434
+
+    @property
+    def is_ready(self) -> bool:
+        return self.available and self.detail == "runtime_reachable"
+
+    @property
+    def friendly_status(self) -> str:
+        if self.available:
+            if self.detail == "runtime_reachable":
+                return f"Online & Ready ({self.runtime} with '{self.model}')"
+            return f"Runtime Reachable, but model '{self.model}' is not installed"
+        return f"Offline / Unreachable (http://{self.host}:{self.port})"
+
+    @property
+    def troubleshooting_steps(self) -> list[str]:
+        if self.available and self.detail == "runtime_reachable":
+            return []
+        if self.available and self.detail == "runtime_reachable_model_not_listed":
+            return [
+                f"Model '{self.model}' is not yet downloaded in your local Ollama environment.",
+                f"Open your terminal and run: `ollama pull {self.model}`",
+                "Once download completes, return here and test the connection.",
+            ]
+        return [
+            f"Local {self.runtime} runtime is not currently running on loopback (http://{self.host}:{self.port}).",
+            "1. Start Ollama locally: Open a terminal and run `ollama serve`.",
+            f"2. Pull the model if needed: Run `ollama pull {self.model}`.",
+            "3. Click 'Test Model Connection' to verify connectivity.",
+            "Privacy guarantee: All AI processing runs strictly on your machine loopback. No data is sent over the internet.",
+        ]
+
+
+def check_local_model(cfg: AIConfig) -> ModelStatus:
+    """Helper to check local model runtime connection without catching errors manually."""
+    try:
+        return LocalModelClient(cfg).status()
+    except Exception as exc:
+        return ModelStatus(False, cfg.runtime, cfg.host, cfg.model, type(exc).__name__, cfg.port)
 
 
 class LocalModelClient:
@@ -35,9 +74,9 @@ class LocalModelClient:
             names = [str(item.get("name", "")) for item in payload.get("models", [])]
             present = any(self.cfg.model in name for name in names) if names else False
             detail = "runtime_reachable" if present else "runtime_reachable_model_not_listed"
-            return ModelStatus(True, self.cfg.runtime, self.cfg.host, self.cfg.model, detail)
+            return ModelStatus(True, self.cfg.runtime, self.cfg.host, self.cfg.model, detail, self.cfg.port)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            return ModelStatus(False, self.cfg.runtime, self.cfg.host, self.cfg.model, type(exc).__name__)
+            return ModelStatus(False, self.cfg.runtime, self.cfg.host, self.cfg.model, type(exc).__name__, self.cfg.port)
 
     def generate(self, prompt: str) -> str:
         body = json.dumps(

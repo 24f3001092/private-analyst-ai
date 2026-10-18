@@ -56,3 +56,64 @@ def test_empty_table(limits: Limits) -> None:
 def test_path_traversal_name(limits: Limits) -> None:
     with pytest.raises(ValidationError):
         validate_upload("..\\secret.csv", 10, limits)
+
+
+def test_hackathon_workbook_inspection(limits: Limits) -> None:
+    from private_analyst.ingestion.loader import inspect_workbook
+
+    wb_path = SAMPLES / "Hackathon_List_2026-1.xlsx"
+    if not wb_path.is_file():
+        pytest.skip("Hackathon_List_2026-1.xlsx not found in samples")
+    info = inspect_workbook(wb_path.read_bytes(), "Hackathon_List_2026-1.xlsx")
+    assert info is not None
+    assert "AI & Agentic Hackathons" in info.sheet_names
+    assert "Coding Hackathons" in info.sheet_names
+    assert "Quick Reference" in info.sheet_names
+    assert info.recommended_sheet == "AI & Agentic Hackathons"
+
+
+def test_hackathon_sheet1_header_detection_and_cleaning(limits: Limits) -> None:
+    wb_path = SAMPLES / "Hackathon_List_2026-1.xlsx"
+    if not wb_path.is_file():
+        pytest.skip("Hackathon_List_2026-1.xlsx not found in samples")
+    ingest = load_tabular(wb_path.read_bytes(), "Hackathon_List_2026-1.xlsx", limits)
+    assert ingest.sheet_name == "AI & Agentic Hackathons"
+    assert ingest.cleaned_shape == (22, 10)
+    assert ingest.header_row == 2
+    assert "AGENTIC AI" in (ingest.detected_title or "")
+    assert ingest.detected_index_column == "#"
+    assert "Hackathon Name" in ingest.frame.columns
+    assert "Organizer" in ingest.frame.columns
+    assert "Unnamed: 1" not in ingest.frame.columns
+
+
+def test_hackathon_sheet2_coding_hackathons(limits: Limits) -> None:
+    wb_path = SAMPLES / "Hackathon_List_2026-1.xlsx"
+    if not wb_path.is_file():
+        pytest.skip("Hackathon_List_2026-1.xlsx not found in samples")
+    ingest = load_tabular(
+        wb_path.read_bytes(),
+        "Hackathon_List_2026-1.xlsx",
+        limits,
+        sheet_name="Coding Hackathons",
+    )
+    assert ingest.sheet_name == "Coding Hackathons"
+    assert ingest.cleaned_shape == (20, 9)
+    assert "Hackathon Name" in ingest.frame.columns
+    assert "Timeline" in ingest.frame.columns
+
+
+def test_hackathon_sheet3_quick_reference(limits: Limits) -> None:
+    wb_path = SAMPLES / "Hackathon_List_2026-1.xlsx"
+    if not wb_path.is_file():
+        pytest.skip("Hackathon_List_2026-1.xlsx not found in samples")
+    ingest = load_tabular(
+        wb_path.read_bytes(),
+        "Hackathon_List_2026-1.xlsx",
+        limits,
+        sheet_name="Quick Reference",
+    )
+    assert ingest.sheet_name == "Quick Reference"
+    assert ingest.cleaned_shape[0] >= 18
+    assert "Month" in ingest.frame.columns
+    assert "Priority" in ingest.frame.columns
