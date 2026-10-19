@@ -1904,30 +1904,42 @@ def main() -> None:
     _sidebar(cfg)
     st.title(cfg.branding.product_name)
     tabs = st.tabs([
-        "Import",
-        "Dashboard",
-        "Ask",
-        "SQL Console",
-        "Advanced Analytics",
-        "Documents",
-        "Reports",
-        "Settings",
+        "1. Import Data",
+        "2. Data Quality",
+        "3. Clean Data",
+        "4. Repair Rows & Columns",
+        "5. Explore Data",
+        "6. Visualizations",
+        "7. Advanced Analytics",
+        "8. Ask & Explain",
+        "9. SQL Console",
+        "10. Documents",
+        "11. Reports & Export",
+        "12. Settings",
     ])
     with tabs[0]:
         _import_tab(cfg, st.session_state.user)
     with tabs[1]:
-        _dashboard_tab()
+        _quality_tab(cfg, st.session_state.user)
     with tabs[2]:
-        _ask_tab(cfg, st.session_state.user)
+        _clean_tab(cfg, st.session_state.user)
     with tabs[3]:
-        _sql_tab(cfg, st.session_state.user)
+        _repair_tab(cfg, st.session_state.user)
     with tabs[4]:
-        _ml_tab(cfg, st.session_state.user)
+        _explore_tab(cfg, st.session_state.user)
     with tabs[5]:
-        _documents_tab(cfg, st.session_state.user)
+        _viz_tab(cfg, st.session_state.user)
     with tabs[6]:
-        _reports_tab(cfg, st.session_state.user)
+        _ml_tab(cfg, st.session_state.user)
     with tabs[7]:
+        _ask_tab(cfg, st.session_state.user)
+    with tabs[8]:
+        _sql_tab(cfg, st.session_state.user)
+    with tabs[9]:
+        _documents_tab(cfg, st.session_state.user)
+    with tabs[10]:
+        _reports_tab(cfg, st.session_state.user)
+    with tabs[11]:
         _settings_tab(cfg, st.session_state.user)
 
 
