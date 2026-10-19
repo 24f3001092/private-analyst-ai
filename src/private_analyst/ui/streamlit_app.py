@@ -203,16 +203,25 @@ def _sidebar(cfg) -> None:
     st.sidebar.write(f"Local model target: `{model_host}` / `{cfg.ai.model}`")
     st.sidebar.write("Uploads are kept in memory unless you export them.")
 
-    ingest_val: IngestResult | None = st.session_state.get("ingest")
-    if ingest_val is not None:
+    ingest_val = st.session_state.get("ingest")
+    if isinstance(ingest_val, IngestResult):
         st.sidebar.divider()
         st.sidebar.subheader("Active Dataset")
-        st.sidebar.markdown(f"**Source:** `{Path(ingest_val.source_name).name}`")
-        if ingest_val.sheet_name:
+        source_name = getattr(ingest_val, "source_name", None)
+        if source_name:
+            st.sidebar.markdown(f"**Source:** `{Path(str(source_name)).name}`")
+        if getattr(ingest_val, "sheet_name", None):
             st.sidebar.caption(f"Sheet: `{ingest_val.sheet_name}`")
-        st.sidebar.caption(f"Shape: **{ingest_val.frame.shape[0]:,} rows × {ingest_val.frame.shape[1]} cols**")
-        ops_cnt = len(getattr(ingest_val, "cleaning_log", None) or getattr(ingest_val, "cleaning_operations", []))
-        st.sidebar.caption(f"Cleaning Log: **{ops_cnt} operation(s)**")
+        frame = getattr(ingest_val, "frame", None)
+        if frame is not None and hasattr(frame, "shape"):
+            try:
+                rows, cols = int(frame.shape[0]), int(frame.shape[1])
+                st.sidebar.caption(f"Shape: **{rows:,} rows × {cols} cols**")
+            except Exception:
+                pass
+        ops = getattr(ingest_val, "cleaning_log", None) or getattr(ingest_val, "cleaning_operations", [])
+        if isinstance(ops, list):
+            st.sidebar.caption(f"Cleaning Log: **{len(ops)} operation(s)**")
 
     if cfg.server.require_auth:
         if st.sidebar.button("Sign out"):
