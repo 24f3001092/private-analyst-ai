@@ -78,6 +78,7 @@ def to_report_excel_bytes(
     frame: pd.DataFrame | Any,
     stats_dict: dict | Any | None = None,
     quality_dict: dict | Any | None = None,
+    cleaning_ops: list[Any] | None = None,
 ) -> bytes:
     """Generate a multi-tab Excel workbook with sanitized data, column stats, and data quality metrics."""
     actual_frame = frame.frame if hasattr(frame, "frame") else frame
@@ -156,11 +157,11 @@ def to_report_excel_bytes(
             ]
             pd.DataFrame(q_rows).to_excel(writer, sheet_name="Data Quality", index=False)
 
-        # Handle cleaning ledger if available on the ingest object
-        cleaning_ops = getattr(frame, "cleaning_log", None) or getattr(frame, "cleaning_operations", None)
-        if cleaning_ops:
+        # Handle cleaning ledger if available on the ingest object or passed explicitly
+        ops_to_use = cleaning_ops or getattr(frame, "cleaning_log", None) or getattr(frame, "cleaning_operations", None)
+        if ops_to_use:
             from private_analyst.ingestion.loader import normalize_cleaning_operation
-            c_rows = [normalize_cleaning_operation(op)[0] for op in cleaning_ops]
+            c_rows = [normalize_cleaning_operation(op)[0] for op in ops_to_use]
             if c_rows:
                 pd.DataFrame(c_rows).to_excel(writer, sheet_name="Cleaning Ledger", index=False)
     return buffer.getvalue()

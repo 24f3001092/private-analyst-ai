@@ -31,6 +31,8 @@ class CleaningOperation:
     affected_columns: list[str] = field(default_factory=list)
     rows_affected: int = 0
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    status: str = "applied"
+    before_after: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +42,8 @@ class CleaningOperation:
             "affected_columns": list(self.affected_columns) if self.affected_columns else [],
             "rows_affected": self.rows_affected,
             "timestamp": self.timestamp,
+            "status": self.status,
+            "before_after": self.before_after,
         }
 
     @classmethod
@@ -58,6 +62,8 @@ class CleaningOperation:
         raw_cols = data.get("affected_columns") or data.get("Affected Columns") or []
         raw_rows = data.get("rows_affected") if "rows_affected" in data else data.get("Rows Affected", 0)
         raw_ts = data.get("timestamp") or data.get("Timestamp")
+        raw_status = data.get("status") or data.get("Status") or "applied"
+        raw_ba = data.get("before_after") or data.get("Before / After") or ""
 
         if isinstance(raw_cols, str):
             cols = [c.strip() for c in raw_cols.split(",") if c.strip()]
@@ -80,6 +86,8 @@ class CleaningOperation:
             affected_columns=cols,
             rows_affected=rows,
             timestamp=ts,
+            status=str(raw_status),
+            before_after=str(raw_ba),
         )
 
 
@@ -206,6 +214,15 @@ class IngestResult:
     semantic_types: dict[str, str] = field(default_factory=dict)
     raw_preview: list[dict[str, Any]] = field(default_factory=list)
     raw_frame: pd.DataFrame | None = None
+    quality_report: Any = None
+
+    @property
+    def working_frame(self) -> pd.DataFrame:
+        return self.frame
+
+    @working_frame.setter
+    def working_frame(self, df: pd.DataFrame) -> None:
+        self.frame = df
 
     @property
     def cleaning_operations(self) -> list[dict[str, Any]]:

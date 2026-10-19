@@ -12,6 +12,16 @@ import streamlit as st
 from private_analyst.ai.client import check_local_model
 from private_analyst.ai.explainer import explain_results
 from private_analyst.analytics.anomalies import detect_iqr_anomalies, detect_zscore_anomalies, linear_trend_forecast
+from private_analyst.analytics.cleaner import (
+    CleaningRecommendation,
+    apply_cleaning_plan,
+    apply_column_management,
+    apply_header_override,
+    filter_rows,
+    generate_cleaning_recommendations,
+    handle_missing_values,
+    repair_unnamed_headers,
+)
 from private_analyst.analytics.ml_engine import run_classification, run_clustering, run_regression
 from private_analyst.analytics.operations import run_operation
 from private_analyst.analytics.quality import assess_quality
@@ -192,6 +202,18 @@ def _sidebar(cfg) -> None:
     model_host = f"{cfg.ai.host}:{cfg.ai.port}"
     st.sidebar.write(f"Local model target: `{model_host}` / `{cfg.ai.model}`")
     st.sidebar.write("Uploads are kept in memory unless you export them.")
+
+    ingest_val: IngestResult | None = st.session_state.get("ingest")
+    if ingest_val is not None:
+        st.sidebar.divider()
+        st.sidebar.subheader("Active Dataset")
+        st.sidebar.markdown(f"**Source:** `{Path(ingest_val.source_name).name}`")
+        if ingest_val.sheet_name:
+            st.sidebar.caption(f"Sheet: `{ingest_val.sheet_name}`")
+        st.sidebar.caption(f"Shape: **{ingest_val.frame.shape[0]:,} rows × {ingest_val.frame.shape[1]} cols**")
+        ops_cnt = len(getattr(ingest_val, "cleaning_log", None) or getattr(ingest_val, "cleaning_operations", []))
+        st.sidebar.caption(f"Cleaning Log: **{ops_cnt} operation(s)**")
+
     if cfg.server.require_auth:
         if st.sidebar.button("Sign out"):
             token = st.session_state.get("session_token")
@@ -400,74 +422,20 @@ def _import_tab(cfg, user: User) -> None:
         st.subheader("Cleaned & Structured Data")
         st.dataframe(ingest.frame.head(cfg.limits.preview_rows), use_container_width=True)
 
-    with st.expander("Interactive Data Preparation & Column Repairs", expanded=bool(getattr(ingest, "unnamed_columns", []))):
-        st.write("Modify headers, exclude columns, or repair unnamed headers interactively:")
-        try:
-            c_prep = st.columns(2)
-            if isinstance(c_prep, (list, tuple)) and len(c_prep) == 2:
-                col_prep1, col_prep2 = c_prep[0], c_prep[1]
-            else:
-                col_prep1, col_prep2 = st, st
-        except Exception:
-            col_prep1, col_prep2 = st, st
-
-        with col_prep1:
-            unnamed_list = getattr(ingest, "unnamed_columns", [])
-            if unnamed_list:
-                st.warning(f"Detected {len(unnamed_list)} unnamed column(s): {', '.join(unnamed_list)}")
-                if st.button("Auto-Repair Unnamed Headers"):
-                    repaired_frame, renamed, op = repair_unnamed_columns(ingest.frame)
-                    if op:
-                        if hasattr(ingest, "add_cleaning_operation"):
-                            ingest.add_cleaning_operation(op)
-                        elif hasattr(ingest, "cleaning_log"):
-                            ingest.cleaning_log.append(op)
-                        elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                            ingest.cleaning_operations.append(op)
-                    ingest.frame = repaired_frame
-                    ingest.unnamed_columns = []
-                    st.session_state.ingest = ingest
-                    st.success(f"Repaired {len(renamed)} column(s): {renamed}")
-                    st.rerun()
-            else:
-                st.success("All column headers are properly named.")
-        with col_prep2:
-            override_header = st.number_input(
-                "Override Header Row (0-indexed)",
-                min_value=0,
-                max_value=max(0, len(ingest.frame) - 1),
-                value=ingest.header_row,
-                step=1,
-            )
-            if isinstance(override_header, int) and override_header != ingest.header_row and st.button("Apply Header Override"):
-                transformed_frame, new_ops = apply_transformations(
-                    ingest.raw_frame if ingest.raw_frame is not None else ingest.frame,
-                    header_row=override_header,
-                )
-                ingest.frame = transformed_frame
-                ingest.header_row = override_header
-                for nop in new_ops:
-                    if hasattr(ingest, "add_cleaning_operation"):
-                        ingest.add_cleaning_operation(nop)
-                    elif hasattr(ingest, "cleaning_log"):
-                        ingest.cleaning_log.append(nop)
-                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                        ingest.cleaning_operations.append(nop)
-                st.session_state.ingest = ingest
-                st.success(f"Applied header override to row {override_header + 1}.")
-                st.rerun()
+    st.info("💡 Next steps: Proceed to **2. Data Quality** to audit completeness, **3. Clean Data** for automated cleaning plans, or **4. Repair Rows & Columns** for interactive adjustments.")
 
 
-def _dashboard_tab() -> None:
+def _quality_tab(cfg, user: User) -> None:
+    st.header("2. Data Quality & Completeness Audit")
+    st.caption("Comprehensive data health diagnostics, missingness metrics, and integrity scoring.")
     ingest: IngestResult | None = st.session_state.ingest
     if ingest is None:
-        st.info("Import a table file first to view dashboard analytics.")
+        st.info("Import a table file first in '1. Import Data' to view data quality diagnostics.")
         return
 
-    stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
     quality = assess_quality(ingest.frame, ingest.duplicate_columns)
+    stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
 
-    st.subheader("Dataset Summary & Health Overview")
     try:
         c_metrics = st.columns(5)
         if isinstance(c_metrics, (list, tuple)) and len(c_metrics) == 5:
@@ -479,26 +447,357 @@ def _dashboard_tab() -> None:
     except Exception:
         pass
 
-    with st.expander("Data Quality Diagnostics & Breakdown", expanded=False):
-        try:
-            b_cols = st.columns(4)
-            if isinstance(b_cols, (list, tuple)) and len(b_cols) == 4:
-                b_cols[0].metric("Completeness", f"{quality.score_breakdown.get('completeness', 0):.1f} / 40")
-                b_cols[1].metric("Uniqueness", f"{quality.score_breakdown.get('uniqueness', 0):.1f} / 20")
-                b_cols[2].metric("Column Health", f"{quality.score_breakdown.get('column_health', 0):.1f} / 20")
-                b_cols[3].metric("Type Consistency", f"{quality.score_breakdown.get('type_consistency', 0):.1f} / 20")
-        except Exception:
-            pass
+    st.subheader("Four Pillars Quality Breakdown")
+    try:
+        b_cols = st.columns(4)
+        if isinstance(b_cols, (list, tuple)) and len(b_cols) == 4:
+            b_cols[0].metric("Completeness", f"{quality.score_breakdown.get('completeness', 0):.1f} / 40")
+            b_cols[1].metric("Uniqueness", f"{quality.score_breakdown.get('uniqueness', 0):.1f} / 20")
+            b_cols[2].metric("Column Health", f"{quality.score_breakdown.get('column_health', 0):.1f} / 20")
+            b_cols[3].metric("Type Consistency", f"{quality.score_breakdown.get('type_consistency', 0):.1f} / 20")
+    except Exception:
+        pass
 
-        if quality.issues:
-            st.write("**Identified Quality Issues:**")
-            for issue in quality.issues:
-                st.caption(f"- {issue}")
+    if quality.issues:
+        st.subheader("Identified Quality Issues")
+        for issue in quality.issues:
+            st.markdown(f"- ⚠️ {issue}")
+    else:
+        st.success("No critical quality defects identified in this dataset.")
 
+    st.subheader("Missingness Distribution")
     if quality.total_missing_cells == 0:
         st.success(f"100% Complete Data: 0 missing values detected across all {stats.column_count} columns.")
     else:
-        st.plotly_chart(missingness(quality.missing_by_column), use_container_width=True)
+        st.plotly_chart(missingness(quality.missing_by_column), key="quality_missingness_chart", use_container_width=True)
+
+    st.subheader("Column-Level Health Audit")
+    col_health_rows = []
+    sem_types = getattr(ingest, "semantic_types", {})
+    for col in stats.columns:
+        null_count = int(quality.missing_by_column.get(col.name, 0))
+        comp_pct = ((stats.row_count - null_count) / stats.row_count * 100) if stats.row_count else 0.0
+        col_health_rows.append({
+            "Column Name": col.name,
+            "Inferred Type": col.kind.title(),
+            "Semantic Type": sem_types.get(col.name, col.kind).title(),
+            "Non-Null Count": stats.row_count - null_count,
+            "Missing Count": null_count,
+            "Completeness (%)": f"{comp_pct:.1f}%",
+            "Unique Values": col.unique,
+        })
+    st.dataframe(pd.DataFrame(col_health_rows), use_container_width=True)
+
+    if quality.duplicate_row_count > 0:
+        with st.expander(f"Inspect {quality.duplicate_row_count} Duplicate Rows", expanded=False):
+            dup_mask = ingest.frame.duplicated(keep=False)
+            st.dataframe(ingest.frame[dup_mask].head(100), use_container_width=True)
+
+
+def _clean_tab(cfg, user: User) -> None:
+    st.header("3. Clean Data & Automation Pipeline")
+    st.caption("Review deterministic cleaning plans, apply automated transformations, and track the audit trail.")
+    ingest: IngestResult | None = st.session_state.ingest
+    if ingest is None:
+        st.info("Import a table file first in '1. Import Data' to enable automated cleaning.")
+        return
+
+    quality = assess_quality(ingest.frame, ingest.duplicate_columns)
+    recs = generate_cleaning_recommendations(ingest.frame, quality)
+
+    st.subheader("Automated Cleaning Recommendations")
+    st.caption("The engine recommends targeted transformations to normalize strings, repair headers, and address missing data.")
+
+    safe_recs = [r for r in recs if not r.is_lossy]
+    lossy_recs = [r for r in recs if r.is_lossy]
+
+    selected_ids: list[str] = []
+
+    if not recs:
+        st.success("No automated cleaning operations are required. The dataset is already well-structured and standardized.")
+    else:
+        if safe_recs:
+            st.markdown("#### Safe Transformations (Preserves All Records)")
+            for r in safe_recs:
+                detail = f" — {r.description}" if r.description else ""
+                aff = f" ({r.affected_count} affected)" if r.affected_count else ""
+                checked = st.checkbox(
+                    f"**{r.title}**{detail}{aff}",
+                    value=True,
+                    key=f"clean_rec_{r.op_id}",
+                )
+                if checked:
+                    selected_ids.append(r.op_id)
+
+        if lossy_recs:
+            st.markdown("#### Cautionary / Lossy Actions (Removes Records or Columns)")
+            for r in lossy_recs:
+                detail = f" — {r.description}" if r.description else ""
+                aff = f" ({r.affected_count} affected)" if r.affected_count else ""
+                checked = st.checkbox(
+                    f"⚠️ **[Lossy] {r.title}**{detail}{aff}",
+                    value=False,
+                    key=f"clean_rec_{r.op_id}",
+                )
+                if checked:
+                    selected_ids.append(r.op_id)
+
+        if st.button("Apply Selected Cleaning Plan", type="primary"):
+            if not selected_ids:
+                st.warning("Please select at least one cleaning operation to apply.")
+            else:
+                summary = apply_cleaning_plan(ingest.frame, selected_ids)
+                ingest.frame = summary.after_frame
+                ingest.working_frame = summary.after_frame
+                for op in summary.operations:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(op)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(op)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(op)
+
+                st.session_state.ingest = ingest
+                try:
+                    _get_audit_log(cfg).record(
+                        user.org_id,
+                        user.username,
+                        "clean_dataset",
+                        f"Ops: {len(summary.operations)}, Shape: {summary.rows_before}x{summary.cols_before}->{summary.rows_after}x{summary.cols_after}",
+                    )
+                except AuditLogError:
+                    pass
+
+                st.success(
+                    f"Successfully applied {len(summary.operations)} cleaning operations! "
+                    f"Dataset transformed from ({summary.rows_before:,} × {summary.cols_before}) "
+                    f"to ({summary.rows_after:,} × {summary.cols_after})."
+                )
+                st.rerun()
+
+    st.divider()
+    st.subheader("Data Cleaning Ledger & Verifiable Audit Trail")
+    st.caption("Immutable chronological record of all automated and manual transformations applied to this dataset.")
+    ops = getattr(ingest, "cleaning_log", None) or getattr(ingest, "cleaning_operations", [])
+    if ops:
+        ledger_rows = []
+        warnings = []
+        for op in ops:
+            row, warn = normalize_cleaning_operation(op)
+            ledger_rows.append(row)
+            if warn:
+                warnings.append(warn)
+
+        if warnings:
+            st.warning(f"Notice: {len(warnings)} cleaning log entries had non-standard formatting. All details were retained.")
+
+        st.dataframe(pd.DataFrame(ledger_rows), use_container_width=True)
+    else:
+        st.info("No cleaning operations have been recorded yet.")
+
+
+def _repair_tab(cfg, user: User) -> None:
+    st.header("4. Repair Rows & Columns")
+    st.caption("Interactive data surgery: promote headers, repair unnamed columns, impute missing values, and filter rows.")
+    ingest: IngestResult | None = st.session_state.ingest
+    if ingest is None:
+        st.info("Import a table file first in '1. Import Data' to repair rows and columns.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Header & Unnamed Column Repairs")
+        unnamed_cols = [c for c in ingest.frame.columns if "unnamed" in str(c).lower()]
+        if unnamed_cols:
+            st.warning(f"Detected {len(unnamed_cols)} unnamed column(s): {', '.join(unnamed_cols)}")
+            if st.button("Auto-Repair Unnamed Headers", type="primary"):
+                repaired_frame, renamed, op = repair_unnamed_headers(ingest.frame)
+                ingest.frame = repaired_frame
+                ingest.working_frame = repaired_frame
+                ingest.unnamed_columns = []
+                if op:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(op)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(op)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(op)
+                st.session_state.ingest = ingest
+                st.success(f"Repaired {len(renamed)} column headers: {renamed}")
+                st.rerun()
+        else:
+            st.success("All column headers are properly named.")
+
+        st.markdown("#### Header Row Override")
+        st.caption("Promote a specific row (0-indexed) to become the column headers, excluding any preceding banner rows.")
+        override_idx = st.number_input(
+            "Select Header Row Index",
+            min_value=0,
+            max_value=max(0, len(ingest.frame) - 1),
+            value=ingest.header_row,
+            step=1,
+            key="repair_override_header_input",
+        )
+        if st.button("Apply Header Override"):
+            source_df = ingest.raw_frame if ingest.raw_frame is not None else ingest.frame
+            repaired_frame, op = apply_header_override(source_df, override_idx)
+            ingest.frame = repaired_frame
+            ingest.working_frame = repaired_frame
+            ingest.header_row = override_idx
+            if op:
+                if hasattr(ingest, "add_cleaning_operation"):
+                    ingest.add_cleaning_operation(op)
+                elif hasattr(ingest, "cleaning_log"):
+                    ingest.cleaning_log.append(op)
+                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                    ingest.cleaning_operations.append(op)
+            st.session_state.ingest = ingest
+            st.success(f"Promoted row {override_idx + 1} to column headers.")
+            st.rerun()
+
+    with col2:
+        st.subheader("Column Management")
+        all_cols = list(ingest.frame.columns)
+        st.markdown("#### Exclude / Drop Columns")
+        cols_to_drop = st.multiselect("Select Columns to Remove", all_cols, key="repair_drop_cols_select")
+        if st.button("Drop Selected Columns") and cols_to_drop:
+            new_frame, op = apply_column_management(ingest.frame, drop_columns=cols_to_drop)
+            ingest.frame = new_frame
+            ingest.working_frame = new_frame
+            if op:
+                if hasattr(ingest, "add_cleaning_operation"):
+                    ingest.add_cleaning_operation(op)
+                elif hasattr(ingest, "cleaning_log"):
+                    ingest.cleaning_log.append(op)
+                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                    ingest.cleaning_operations.append(op)
+            st.session_state.ingest = ingest
+            st.success(f"Dropped {len(cols_to_drop)} column(s).")
+            st.rerun()
+
+        st.markdown("#### Rename Column")
+        col_to_rename = st.selectbox("Select Column to Rename", all_cols, key="repair_rename_col_select")
+        new_col_name = st.text_input("New Column Name", value=str(col_to_rename), key="repair_new_col_name_input")
+        if st.button("Rename Column") and new_col_name and new_col_name != col_to_rename:
+            new_frame, op = apply_column_management(ingest.frame, rename_columns={col_to_rename: new_col_name})
+            ingest.frame = new_frame
+            ingest.working_frame = new_frame
+            if op:
+                if hasattr(ingest, "add_cleaning_operation"):
+                    ingest.add_cleaning_operation(op)
+                elif hasattr(ingest, "cleaning_log"):
+                    ingest.cleaning_log.append(op)
+                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                    ingest.cleaning_operations.append(op)
+            st.session_state.ingest = ingest
+            st.success(f"Renamed '{col_to_rename}' to '{new_col_name}'.")
+            st.rerun()
+
+    st.divider()
+    c_sub1, c_sub2 = st.columns(2)
+    with c_sub1:
+        st.subheader("Missing Value Imputation")
+        missing_cols = [c for c in ingest.frame.columns if ingest.frame[c].isna().any()]
+        if not missing_cols:
+            st.success("No missing values in any column.")
+        else:
+            imp_col = st.selectbox("Column with Missing Values", missing_cols, key="repair_imp_col_select")
+            imp_strategy = st.selectbox(
+                "Imputation Strategy",
+                ["fill_mean", "fill_median", "fill_mode", "fill_zero", "fill_na_text", "forward_fill"],
+                format_func=lambda s: {
+                    "fill_mean": "Fill with Mean (Numeric)",
+                    "fill_median": "Fill with Median (Numeric)",
+                    "fill_mode": "Fill with Mode (Most Frequent)",
+                    "fill_zero": "Fill with Zero (0)",
+                    "fill_na_text": "Fill with 'N/A' (Text)",
+                    "forward_fill": "Forward Fill (Carry Previous)",
+                }.get(s, s),
+                key="repair_imp_strat_select",
+            )
+            if st.button("Impute Missing Values"):
+                new_frame, op = handle_missing_values(ingest.frame, imp_col, imp_strategy)
+                ingest.frame = new_frame
+                ingest.working_frame = new_frame
+                if op:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(op)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(op)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(op)
+                st.session_state.ingest = ingest
+                st.success(f"Imputed missing values for '{imp_col}'.")
+                st.rerun()
+
+    with c_sub2:
+        st.subheader("Row Filtering & Subsetting")
+        filter_col = st.selectbox("Filter on Column", list(ingest.frame.columns), key="repair_filter_col_select")
+        filter_op = st.selectbox(
+            "Comparison Operator",
+            ["==", "!=", ">", "<", ">=", "<=", "contains", "not_contains", "is_not_null", "is_null"],
+            key="repair_filter_op_select",
+        )
+        filter_val = st.text_input("Comparison Value", value="", key="repair_filter_val_input")
+        if st.button("Apply Row Filter"):
+            new_frame, op = filter_rows(ingest.frame, filter_col, filter_op, filter_val)
+            ingest.frame = new_frame
+            ingest.working_frame = new_frame
+            if op:
+                if hasattr(ingest, "add_cleaning_operation"):
+                    ingest.add_cleaning_operation(op)
+                elif hasattr(ingest, "cleaning_log"):
+                    ingest.cleaning_log.append(op)
+                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                    ingest.cleaning_operations.append(op)
+            st.session_state.ingest = ingest
+            st.success(f"Filter applied: {len(new_frame):,} rows remaining.")
+            st.rerun()
+
+    if ingest.raw_frame is not None:
+        st.divider()
+        st.subheader("Revert Dataset to Original File State")
+        st.caption("Discard all interactive modifications and restore the original uncleaned spreadsheet buffer.")
+        if st.button("Reset Dataset to Raw Extract", type="secondary"):
+            ingest.frame = ingest.raw_frame.copy()
+            ingest.working_frame = ingest.raw_frame.copy()
+            ingest.unnamed_columns = [c for c in ingest.frame.columns if "unnamed" in str(c).lower()]
+            reset_op = CleaningOperation(
+                step="reset_dataset",
+                description="Reset dataset to raw file extract",
+                impact=f"Restored {len(ingest.frame)} rows and {len(ingest.frame.columns)} columns",
+                rows_affected=len(ingest.frame),
+            )
+            if hasattr(ingest, "add_cleaning_operation"):
+                ingest.add_cleaning_operation(reset_op)
+            elif hasattr(ingest, "cleaning_log"):
+                ingest.cleaning_log.append(reset_op)
+            elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                ingest.cleaning_operations.append(reset_op)
+            st.session_state.ingest = ingest
+            st.success("Dataset successfully reset to original file state.")
+            st.rerun()
+
+
+def _explore_tab(cfg, user: User) -> None:
+    st.header("5. Explore Data & Statistical Profiles")
+    st.caption("Distribution profiles, descriptive statistics, and correlation matrix.")
+    ingest: IngestResult | None = st.session_state.ingest
+    if ingest is None:
+        st.info("Import a table file first in '1. Import Data' to explore data.")
+        return
+
+    stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
+
+    try:
+        c_metrics = st.columns(4)
+        if isinstance(c_metrics, (list, tuple)) and len(c_metrics) == 4:
+            c_metrics[0].metric("Total Records", f"{stats.row_count:,}")
+            c_metrics[1].metric("Total Columns", f"{stats.column_count}")
+            c_metrics[2].metric("Numeric Features", f"{len(stats.numeric_column_names)}")
+            c_metrics[3].metric("Categorical Features", f"{stats.column_count - len(stats.numeric_column_names)}")
+    except Exception:
+        pass
 
     numeric_rows = [
         {
@@ -519,10 +818,10 @@ def _dashboard_tab() -> None:
         st.subheader("Numeric Distributions")
         st.dataframe(pd.DataFrame(numeric_rows), use_container_width=True)
         first_num = stats.numeric_column_names[0]
-        st.plotly_chart(histogram(ingest.frame, first_num), use_container_width=True)
+        st.plotly_chart(histogram(ingest.frame, first_num), key=f"explore_hist_{first_num}", use_container_width=True)
         cats = [c for c in ingest.frame.columns if c not in stats.numeric_column_names]
         if cats:
-            st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first_num), use_container_width=True)
+            st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first_num), key=f"explore_barsum_{cats[0]}_{first_num}", use_container_width=True)
 
     cat_cols_stats = [col for col in stats.columns if col.kind != "numeric" and col.name not in {"#", "id", "s.no", "sl.no", "index"}]
     if cat_cols_stats:
@@ -542,8 +841,106 @@ def _dashboard_tab() -> None:
         ]
         st.dataframe(pd.DataFrame(cat_summary_rows), use_container_width=True)
         top_cat_name = cat_cols_stats[0].name
-        st.plotly_chart(category_bar(ingest.frame, top_cat_name), use_container_width=True)
+        st.plotly_chart(category_bar(ingest.frame, top_cat_name), key=f"explore_topcat_{top_cat_name}", use_container_width=True)
 
+    if len(stats.numeric_column_names) >= 2:
+        st.subheader("Correlation Matrix & Pairwise Association")
+        st.caption("Pearson correlation coefficients across numeric features.")
+        c_res = compute_correlation_matrix(ingest.frame)
+        if c_res.get("status") == "ok":
+            corr_df = pd.DataFrame(c_res["matrix"])
+            st.plotly_chart(correlation_heatmap(corr_df), key="explore_corr_heatmap", use_container_width=True)
+            if c_res.get("top_correlations"):
+                with st.expander("Ranked Correlation Pairs", expanded=False):
+                    st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+
+
+def _viz_tab(cfg, user: User) -> None:
+    st.header("6. Visualizations & Chart Studio")
+    st.caption("Interactive chart generation studio and smart data-driven recommendations.")
+    ingest: IngestResult | None = st.session_state.ingest
+    if ingest is None:
+        st.info("Import a table file first in '1. Import Data' to visualize charts.")
+        return
+
+    stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
+    all_cols = list(ingest.frame.columns)
+    numeric_cols = stats.numeric_column_names
+    cat_cols = [c for c in all_cols if c not in numeric_cols and c not in {"#", "id", "s.no", "sl.no", "index"}]
+
+    st.subheader("Interactive Chart Builder")
+    chart_type = st.selectbox(
+        "Select Chart Type",
+        [
+            "Category Frequency (Bar)",
+            "Numeric Distribution (Histogram)",
+            "Group Sum / Aggregate (Bar)",
+            "Outlier Box Plot",
+            "Correlation Heatmap",
+            "Time Series Trend",
+        ],
+        key="viz_builder_chart_type",
+    )
+
+    if chart_type == "Category Frequency (Bar)":
+        if not cat_cols:
+            st.warning("No categorical columns available.")
+        else:
+            sel_col = st.selectbox("Select Categorical Column", cat_cols, key="viz_cat_select")
+            st.plotly_chart(category_bar(ingest.frame, sel_col), key=f"viz_builder_catbar_{sel_col}", use_container_width=True)
+
+    elif chart_type == "Numeric Distribution (Histogram)":
+        if not numeric_cols:
+            st.warning("No numeric columns available.")
+        else:
+            sel_num = st.selectbox("Select Numeric Column", numeric_cols, key="viz_num_select")
+            st.plotly_chart(histogram(ingest.frame, sel_num), key=f"viz_builder_hist_{sel_num}", use_container_width=True)
+
+    elif chart_type == "Group Sum / Aggregate (Bar)":
+        if not cat_cols or not numeric_cols:
+            st.warning("Group Sum chart requires at least one categorical column and one numeric column.")
+        else:
+            c1, c2 = st.columns(2)
+            sel_cat = c1.selectbox("Category Dimension (X)", cat_cols, key="viz_barsum_cat")
+            sel_val = c2.selectbox("Aggregate Value (Y)", numeric_cols, key="viz_barsum_val")
+            st.plotly_chart(bar_sum(ingest.frame, sel_cat, sel_val), key=f"viz_builder_barsum_{sel_cat}_{sel_val}", use_container_width=True)
+
+    elif chart_type == "Outlier Box Plot":
+        if not numeric_cols:
+            st.warning("Outlier Box Plot requires numeric columns.")
+        else:
+            sel_box = st.selectbox("Select Numeric Column", numeric_cols, key="viz_box_select")
+            st.plotly_chart(outlier_box(ingest.frame, sel_box, title=f"Distribution & Outliers for '{sel_box}'"), key=f"viz_builder_box_{sel_box}", use_container_width=True)
+
+    elif chart_type == "Correlation Heatmap":
+        if len(numeric_cols) < 2:
+            st.warning("Correlation heatmap requires at least two numeric columns.")
+        else:
+            c_res = compute_correlation_matrix(ingest.frame)
+            if c_res.get("status") == "ok":
+                st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), key="viz_builder_corr_matrix", use_container_width=True)
+            else:
+                st.warning(c_res.get("caveat", "Insufficient variance to compute correlation."))
+
+    elif chart_type == "Time Series Trend":
+        date_candidates = [
+            c for c in all_cols
+            if "date" in c.lower() or "time" in c.lower() or "year" in c.lower() or pd.api.types.is_datetime64_any_dtype(ingest.frame[c])
+        ]
+        if not date_candidates:
+            date_candidates = all_cols
+        c1, c2 = st.columns(2)
+        sel_date = c1.selectbox("Date / Timestamp Column", date_candidates, key="viz_date_col")
+        sel_metric = c2.selectbox("Metric Column (Optional)", ["(Record Count)"] + numeric_cols, key="viz_metric_col")
+        actual_val = None if sel_metric == "(Record Count)" else sel_metric
+        t_res = compute_time_trends(ingest.frame, sel_date, actual_val)
+        if t_res.get("status") == "ok":
+            trend_df = pd.DataFrame(t_res["trend_table"])
+            st.plotly_chart(time_series_line(trend_df, "period", "total", f"Trends over {t_res['freq_label']} Intervals"), key=f"viz_builder_trend_{sel_date}_{actual_val}", use_container_width=True)
+        else:
+            st.warning(t_res.get("caveat", "Unable to compute time trend."))
+
+    st.divider()
     recs = recommend_charts(ingest.frame, stats)
     if recs:
         st.subheader("Automated Chart Recommendations")
@@ -554,25 +951,22 @@ def _dashboard_tab() -> None:
                 st.markdown(f"**{rec['title']}**")
                 st.caption(rec['description'])
                 rtype = rec.get("type")
-                if rtype == "category_bar" and rec.get("column") in ingest.frame.columns:
-                    st.plotly_chart(category_bar(ingest.frame, rec["column"]), use_container_width=True)
-                elif rtype == "histogram" and rec.get("column") in ingest.frame.columns:
-                    st.plotly_chart(histogram(ingest.frame, rec["column"]), use_container_width=True)
+                rcol = rec.get("column")
+                if rtype == "category_bar" and rcol in ingest.frame.columns:
+                    st.plotly_chart(category_bar(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
+                elif rtype == "histogram" and rcol in ingest.frame.columns:
+                    st.plotly_chart(histogram(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
                 elif rtype == "correlation_heatmap":
                     c_res = compute_correlation_matrix(ingest.frame)
                     if c_res.get("status") == "ok":
-                        st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), use_container_width=True)
+                        st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), key=f"viz_rec_{idx}_{rtype}_matrix", use_container_width=True)
 
-    if len(stats.numeric_column_names) >= 2:
-        st.subheader("Correlation Matrix & Pairwise Association")
-        st.caption("Pearson correlation coefficients across numeric features.")
-        c_res = compute_correlation_matrix(ingest.frame)
-        if c_res.get("status") == "ok":
-            corr_df = pd.DataFrame(c_res["matrix"])
-            st.plotly_chart(correlation_heatmap(corr_df), use_container_width=True)
-            if c_res.get("top_correlations"):
-                with st.expander("Ranked Correlation Pairs", expanded=False):
-                    st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+
+def _dashboard_tab() -> None:
+    """Backward-compatible entry point for dashboard view."""
+    cfg = load_config()
+    user = st.session_state.get("user") or _desktop_user(cfg.server.edition)
+    _explore_tab(cfg, user)
 
 
 def _ask_tab(cfg, user: User) -> None:
@@ -654,18 +1048,18 @@ def _ask_tab(cfg, user: User) -> None:
         spec = result.chart_spec
         chart_type = spec.get("type")
         if chart_type == "category_bar" and spec.get("column") in ingest.frame.columns:
-            st.plotly_chart(category_bar(ingest.frame, spec["column"]), use_container_width=True)
+            st.plotly_chart(category_bar(ingest.frame, spec["column"]), key=f"ask_catbar_{spec['column']}", use_container_width=True)
         elif chart_type == "histogram" and spec.get("column") in ingest.frame.columns:
-            st.plotly_chart(histogram(ingest.frame, spec["column"]), use_container_width=True)
+            st.plotly_chart(histogram(ingest.frame, spec["column"]), key=f"ask_hist_{spec['column']}", use_container_width=True)
         elif chart_type == "crosstab_heatmap" and "crosstab" in result.calculated:
             ct_df = pd.DataFrame(result.calculated["crosstab"])
-            st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), use_container_width=True)
+            st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), key=f"ask_crosstab_{spec.get('col_col')}_{spec.get('row_col')}", use_container_width=True)
         elif chart_type == "correlation_heatmap" and "matrix" in result.calculated:
-            st.plotly_chart(correlation_heatmap(pd.DataFrame(result.calculated["matrix"])), use_container_width=True)
+            st.plotly_chart(correlation_heatmap(pd.DataFrame(result.calculated["matrix"])), key="ask_corr_heatmap", use_container_width=True)
         elif chart_type == "time_series_line" and "trend_table" in result.calculated:
-            st.plotly_chart(time_series_line(pd.DataFrame(result.calculated["trend_table"]), "period", "total", f"Time Trend for '{spec.get('date_col')}'"), use_container_width=True)
+            st.plotly_chart(time_series_line(pd.DataFrame(result.calculated["trend_table"]), "period", "total", f"Time Trend for '{spec.get('date_col')}'"), key=f"ask_trend_{spec.get('date_col')}", use_container_width=True)
         elif chart_type == "bar" and spec.get("x") in ingest.frame.columns and spec.get("y") in ingest.frame.columns:
-            st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), use_container_width=True)
+            st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), key=f"ask_barsum_{spec['x']}_{spec['y']}", use_container_width=True)
 
     with st.container():
         st.markdown(f"**Intent:** `{result.intent.title()}` | **Engine Status:** `{result.status.upper()}`")
@@ -874,7 +1268,7 @@ def _ml_tab(cfg, user: User) -> None:
             m4.metric("Top 3 Share", f"{top_3_share:.1f}%")
 
             st.dataframe(freq_df, use_container_width=True)
-            st.plotly_chart(category_bar(frame, selected_col), use_container_width=True)
+            st.plotly_chart(category_bar(frame, selected_col), key=f"ml_catbar_{selected_col}", use_container_width=True)
 
             csv_bytes = to_csv_bytes(freq_df)
             st.download_button(
@@ -924,6 +1318,7 @@ def _ml_tab(cfg, user: User) -> None:
             st.dataframe(ct, use_container_width=True)
             st.plotly_chart(
                 crosstab_heatmap(ct, col_dim, row_dim, f"{row_dim} vs {col_dim} ({normalize_opt})"),
+                key=f"ml_crosstab_{row_dim}_{col_dim}",
                 use_container_width=True,
             )
 
@@ -988,7 +1383,7 @@ def _ml_tab(cfg, user: User) -> None:
             c_res = compute_correlation_matrix(frame)
             if c_res.get("status") == "ok":
                 corr_df = pd.DataFrame(c_res["matrix"])
-                st.plotly_chart(correlation_heatmap(corr_df), use_container_width=True)
+                st.plotly_chart(correlation_heatmap(corr_df), key="ml_corr_heatmap", use_container_width=True)
                 if c_res.get("top_correlations"):
                     st.write("### Top Associated Variable Pairs")
                     st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
@@ -1020,7 +1415,7 @@ def _ml_tab(cfg, user: User) -> None:
                 trend_df = pd.DataFrame(t_res["trend_table"])
                 st.metric("Time Span", f"{t_res['min_date']} to {t_res['max_date']} ({t_res['span_days']} days)")
                 st.dataframe(trend_df, use_container_width=True)
-                st.plotly_chart(time_series_line(trend_df, "period", "total", f"Trends over {t_res['freq_label']} Intervals"), use_container_width=True)
+                st.plotly_chart(time_series_line(trend_df, "period", "total", f"Trends over {t_res['freq_label']} Intervals"), key=f"ml_timeseries_{date_col}_{actual_val}", use_container_width=True)
                 _get_audit_log(cfg).record(
                     user.org_id,
                     user.username,
@@ -1132,7 +1527,7 @@ def _ml_tab(cfg, user: User) -> None:
                 c2.metric("Lower Fence", f"{res.lower:.4f}")
                 c3.metric("Upper Fence", f"{res.upper:.4f}")
                 st.info(f"Methodological caveat: {res.caveat}")
-                st.plotly_chart(outlier_box(frame, col, lower=res.lower, upper=res.upper, title=f"Box Plot & Outlier Fences for '{col}'"), use_container_width=True)
+                st.plotly_chart(outlier_box(frame, col, lower=res.lower, upper=res.upper, title=f"Box Plot & Outlier Fences for '{col}'"), key=f"ml_iqr_box_{col}", use_container_width=True)
                 if res.outlier_row_indexes:
                     st.write(f"Sample Outlier Rows ({len(res.outlier_row_indexes)} detected):")
                     st.dataframe(frame.iloc[res.outlier_row_indexes], use_container_width=True)
@@ -1160,7 +1555,7 @@ def _ml_tab(cfg, user: User) -> None:
                 c2.metric("Mean", f"{res.lower:.4f}")
                 c3.metric("Std Dev", f"{res.upper:.4f}")
                 st.info(f"Methodological caveat: {res.caveat}")
-                st.plotly_chart(outlier_box(frame, col, title=f"Distribution & Outliers for '{col}'"), use_container_width=True)
+                st.plotly_chart(outlier_box(frame, col, title=f"Distribution & Outliers for '{col}'"), key=f"ml_zscore_box_{col}", use_container_width=True)
                 if res.outlier_row_indexes:
                     st.write(f"Sample Outlier Rows ({len(res.outlier_row_indexes)} detected):")
                     st.dataframe(frame.iloc[res.outlier_row_indexes], use_container_width=True)
@@ -1209,7 +1604,7 @@ def _ml_tab(cfg, user: User) -> None:
                     )
                 )
                 fig.update_layout(title=f"Trend & Forecast for '{col}'", xaxis_title="Observation Index", yaxis_title=col)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, key=f"ml_trend_scatter_{col}", use_container_width=True)
 
 
 def _documents_tab(cfg, user: User) -> None:
@@ -1282,8 +1677,9 @@ def _reports_tab(cfg, user: User) -> None:
         multi_sheet = st.checkbox("Multi-sheet Excel workbook (includes Column Statistics & Data Quality sheets)", value=True)
         stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
         quality = assess_quality(ingest.frame, ingest.duplicate_columns)
+        cleaning_ops = getattr(ingest, "cleaning_log", None) or getattr(ingest, "cleaning_operations", [])
         excel_bytes = (
-            to_report_excel_bytes(ingest.frame, stats, quality)
+            to_report_excel_bytes(ingest.frame, stats, quality, cleaning_ops=cleaning_ops)
             if multi_sheet
             else to_excel_bytes(ingest.frame)
         )
