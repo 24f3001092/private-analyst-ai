@@ -23,7 +23,7 @@ class CleaningRecommendation:
     category: str
     description: str
     affected_columns: list[str] = field(default_factory=list)
-    affected_rows_count: int = 0
+    affected_rows_count: int | None = None
     estimated_impact: str = ""
     is_lossy: bool = False
     default_enabled: bool = True
@@ -98,7 +98,7 @@ def generate_cleaning_recommendations(
                 category="Structure",
                 description=f"Detected {len(unnamed_cols)} unnamed header(s) resulting from spreadsheet formatting: {', '.join(unnamed_cols[:5])}",
                 affected_columns=unnamed_cols,
-                affected_rows_count=0,
+                affected_rows_count=None,
                 estimated_impact="Assigns clean, deterministic names (e.g. column_1, column_2) to ensure predictable indexing.",
                 is_lossy=False,
                 default_enabled=True,
@@ -115,7 +115,7 @@ def generate_cleaning_recommendations(
                 category="Structure",
                 description=f"Detected {len(dup_cols)} duplicate column name(s) with disambiguation suffixes.",
                 affected_columns=dup_cols,
-                affected_rows_count=0,
+                affected_rows_count=None,
                 estimated_impact="Standardizes duplicate column headers with clean canonical aliases.",
                 is_lossy=False,
                 default_enabled=True,
@@ -169,6 +169,7 @@ def generate_cleaning_recommendations(
 
     # 6. Numeric strings stored as text
     numeric_str_cols = []
+    affected_numeric_rows = set()
     for col in frame.columns:
         s = frame[col]
         if s.dtype == object or isinstance(s.dtype, pd.StringDtype):
@@ -176,9 +177,10 @@ def generate_cleaning_recommendations(
             if len(non_null) >= 3:
                 str_s = non_null.astype(str).str.strip().str.replace(",", "", regex=False)
                 coerced = pd.to_numeric(str_s, errors="coerce")
-                valid_ratio = coerced.notna().mean()
-                if valid_ratio >= 0.90:
+                valid_mask = coerced.notna()
+                if valid_mask.mean() >= 0.90:
                     numeric_str_cols.append(str(col))
+                    affected_numeric_rows.update(non_null[valid_mask].index.tolist())
 
     if numeric_str_cols:
         recs.append(
@@ -188,7 +190,7 @@ def generate_cleaning_recommendations(
                 category="Types",
                 description=f"Detected numeric numbers formatted as text strings in {len(numeric_str_cols)} column(s): {', '.join(numeric_str_cols)}.",
                 affected_columns=numeric_str_cols,
-                affected_rows_count=0,
+                affected_rows_count=len(affected_numeric_rows) if affected_numeric_rows else None,
                 estimated_impact="Casts text columns to proper numeric types to enable aggregation and statistics.",
                 is_lossy=False,
                 default_enabled=True,
@@ -197,15 +199,17 @@ def generate_cleaning_recommendations(
 
     # 7. Currency strings
     currency_cols = []
+    affected_currency_rows = set()
     for col in frame.columns:
         s = frame[col]
         if s.dtype == object or isinstance(s.dtype, pd.StringDtype):
             non_null = s.dropna()
             if len(non_null) >= 2:
                 sample = non_null.astype(str).str.strip()
-                matches = sample.str.contains(r"[₹\$€£¥]|(?:inr|usd|eur|gbp)", regex=True, case=False).mean()
-                if matches >= 0.60:
+                matches = sample.str.contains(r"[₹\$€£¥]|(?:inr|usd|eur|gbp)", regex=True, case=False)
+                if matches.mean() >= 0.60:
                     currency_cols.append(str(col))
+                    affected_currency_rows.update(non_null[matches].index.tolist())
 
     if currency_cols:
         recs.append(
@@ -215,7 +219,7 @@ def generate_cleaning_recommendations(
                 category="Types",
                 description=f"Detected currency formatted values in: {', '.join(currency_cols)}.",
                 affected_columns=currency_cols,
-                affected_rows_count=0,
+                affected_rows_count=len(affected_currency_rows) if affected_currency_rows else None,
                 estimated_impact="Extracts numeric float amounts while preserving currency indicators.",
                 is_lossy=False,
                 default_enabled=True,
@@ -224,15 +228,17 @@ def generate_cleaning_recommendations(
 
     # 8. Percentage strings
     pct_cols = []
+    affected_pct_rows = set()
     for col in frame.columns:
         s = frame[col]
         if s.dtype == object or isinstance(s.dtype, pd.StringDtype):
             non_null = s.dropna()
             if len(non_null) >= 2:
                 sample = non_null.astype(str).str.strip()
-                matches = sample.str.endswith("%").mean()
-                if matches >= 0.70:
+                matches = sample.str.endswith("%")
+                if matches.mean() >= 0.70:
                     pct_cols.append(str(col))
+                    affected_pct_rows.update(non_null[matches].index.tolist())
 
     if pct_cols:
         recs.append(
@@ -242,7 +248,7 @@ def generate_cleaning_recommendations(
                 category="Types",
                 description=f"Detected percentage strings in: {', '.join(pct_cols)}.",
                 affected_columns=pct_cols,
-                affected_rows_count=0,
+                affected_rows_count=len(affected_pct_rows) if affected_pct_rows else None,
                 estimated_impact="Converts percentage values to numeric floats (e.g. '25%' -> 25.0).",
                 is_lossy=False,
                 default_enabled=True,
@@ -259,7 +265,7 @@ def generate_cleaning_recommendations(
                 category="Structure",
                 description=f"Detected {len(empty_cols)} column(s) with 100% missing values: {', '.join(empty_cols)}.",
                 affected_columns=empty_cols,
-                affected_rows_count=0,
+                affected_rows_count=None,
                 estimated_impact=f"Removes {len(empty_cols)} non-informative empty column(s).",
                 is_lossy=True,
                 default_enabled=False,  # Require user confirmation
@@ -280,7 +286,7 @@ def generate_cleaning_recommendations(
                 category="Structure",
                 description=f"Detected {len(constant_cols)} column(s) with identical value across all rows: {', '.join(constant_cols)}.",
                 affected_columns=constant_cols,
-                affected_rows_count=0,
+                affected_rows_count=None,
                 estimated_impact="Drops columns that provide zero variance or predictive value.",
                 is_lossy=True,
                 default_enabled=False,

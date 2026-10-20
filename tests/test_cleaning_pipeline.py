@@ -337,3 +337,257 @@ def test_export_includes_cleaned_data_and_ledger(limits: Limits) -> None:
     ledger_df = pd.read_excel(xls, sheet_name="Cleaning Ledger")
     assert not ledger_df.empty
     assert "Test Ledger Export" in ledger_df["Step"].values
+
+
+class MockSessionState(dict):
+    """Dictionary supporting attribute-style access for Streamlit session_state simulation."""
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name: str, value):
+        self[name] = value
+
+    def __delattr__(self, name: str):
+        try:
+            del self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+
+def test_recommendation_label_formatting_no_affected_count_crash() -> None:
+    """1. Verify CleaningRecommendation model can be rendered without an affected_count crash."""
+    from private_analyst.ui.streamlit_app import _format_cleaning_rec_label
+
+    # Normal recommendation with positive affected rows
+    rec_with_rows = CleaningRecommendation(
+        id="drop_empty_rows",
+        title="Drop Blank Rows",
+        category="Structure",
+        description="Found 5 blank rows.",
+        affected_rows_count=5,
+    )
+    # Ensure rec does NOT have affected_count attribute
+    assert not hasattr(rec_with_rows, "affected_count")
+    label, rec_id = _format_cleaning_rec_label(rec_with_rows)
+    assert rec_id == "drop_empty_rows"
+    assert "Drop Blank Rows" in label
+    assert "Found 5 blank rows." in label
+    assert "(5 affected)" in label
+
+    # Recommendation with None affected rows (unknown / not applicable)
+    rec_none_rows = CleaningRecommendation(
+        id="repair_unnamed_headers",
+        title="Repair Unnamed Headers",
+        category="Structure",
+        description="Repair 2 unnamed columns.",
+        affected_rows_count=None,
+    )
+    label_none, rec_id_none = _format_cleaning_rec_label(rec_none_rows)
+    assert rec_id_none == "repair_unnamed_headers"
+    assert "Repair Unnamed Headers" in label_none
+    assert "affected" not in label_none
+
+    # Recommendation with 0 affected rows
+    rec_zero_rows = CleaningRecommendation(
+        id="zero_op",
+        title="Zero Op",
+        category="Structure",
+        description="Zero rows.",
+        affected_rows_count=0,
+    )
+    label_zero, _ = _format_cleaning_rec_label(rec_zero_rows)
+    assert "affected" not in label_zero
+
+
+def test_real_recommendations_display_correct_description_and_impact() -> None:
+    """2. Real recommendations display their correct description and available impact information."""
+    from private_analyst.ui.streamlit_app import _format_cleaning_rec_label
+
+    df = pd.DataFrame({
+        "Amount": [" $1,000 ", " $2,500 ", " $1,000 ", None],
+        "Pct": ["10%", "20%", "10%", None],
+        "EmptyCol": [None, None, None, None],
+    })
+    recs = generate_cleaning_recommendations(df)
+    assert len(recs) > 0
+
+    for r in recs:
+        assert not hasattr(r, "affected_count")
+        label, rec_id = _format_cleaning_rec_label(r)
+        assert rec_id == r.id
+        assert r.title in label
+        if r.description:
+            assert r.description in label
+        if r.affected_rows_count and r.affected_rows_count > 0:
+            assert f"({r.affected_rows_count} affected)" in label
+        else:
+            assert "affected" not in label
+
+
+def test_unknown_affected_counts_handled_honestly() -> None:
+    """3. Unknown or non-applicable affected counts are represented safely and omit affected label."""
+    from private_analyst.ui.streamlit_app import _format_cleaning_rec_label
+
+    df = pd.DataFrame({
+        "Unnamed: 0": [1, 2, 3],
+        "ConstCol": ["A", "A", "A"],
+        "AllEmpty": [None, None, None],
+    })
+    recs = generate_cleaning_recommendations(df)
+    unnamed_rec = next(r for r in recs if r.id == "repair_unnamed_headers")
+    assert unnamed_rec.affected_rows_count is None
+
+    const_rec = next(r for r in recs if r.id == "drop_constant_columns")
+    assert const_rec.affected_rows_count is None
+
+    empty_rec = next(r for r in recs if r.id == "drop_empty_cols")
+    assert empty_rec.affected_rows_count is None
+
+    for r in [unnamed_rec, const_rec, empty_rec]:
+        label, _ = _format_cleaning_rec_label(r)
+        assert "affected" not in label
+        assert "(0 affected)" not in label
+
+
+def test_applying_selected_recommendation_invokes_correct_cleaning_operation() -> None:
+    """4. Applying a selected recommendation still invokes the correct cleaning operation."""
+    df = pd.DataFrame({
+        "City": ["Delhi", "Mumbai", "Delhi"],
+        "Code": [11, 22, 11],
+    })
+    cleaned_df, ops = apply_cleaning_plan(df, ["deduplicate_rows"])
+    assert len(cleaned_df) == 2
+    assert len(ops) == 1
+    assert ops[0].step == "deduplicate_rows"
+    assert ops[0].rows_affected == 1
+
+
+def test_clean_tab_workflow_and_ledger_persistence() -> None:
+    """5. Full cleaning workflow and cleaning history persistence across Streamlit reruns."""
+    from unittest.mock import MagicMock, patch
+    from private_analyst.auth.users import User
+    from private_analyst.config import load_config
+    from private_analyst.ui.streamlit_app import _clean_tab
+
+    cfg = load_config()
+    user = User(id=1, org_id="test-org", username="analyst", role="analyst")
+
+    df = pd.DataFrame({
+        "City": ["Delhi", "Mumbai", "Delhi"],
+        "Amount": [" $100 ", " $200 ", " $100 "],
+    })
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    limits = Limits()
+    ingest = load_tabular(csv_bytes, "workflow_test.csv", limits)
+
+    state = MockSessionState({
+        "ingest": ingest,
+        "clean_rec_deduplicate_rows": True,
+        "clean_rec_strip_whitespace": True,
+        "clean_rec_parse_currencies": True,
+    })
+
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app._get_audit_log") as mock_log_getter:
+        mock_st.session_state = state
+        # Simulate button clicked
+        mock_st.button.return_value = True
+        mock_log = MagicMock()
+        mock_log_getter.return_value = mock_log
+
+        # Execute _clean_tab: must not raise AttributeError('affected_count') or any error
+        _clean_tab(cfg, user)
+
+        # Verify operations were recorded and applied
+        assert len(ingest.cleaning_log) >= 1
+        assert len(ingest.frame) == 2  # Deduplicated from 3 to 2 rows
+        assert mock_st.rerun.called
+        assert mock_log.record.called
+        assert mock_log.record.call_args[0][2] == "clean_dataset"
+
+
+def test_clean_tab_empty_dataset_and_empty_recommendations() -> None:
+    """6. The Clean Data page handles an empty dataset or an empty recommendation list."""
+    from unittest.mock import patch
+    from private_analyst.auth.users import User
+    from private_analyst.config import load_config
+    from private_analyst.ui.streamlit_app import _clean_tab
+
+    cfg = load_config()
+    user = User(id=1, org_id="test-org", username="analyst", role="analyst")
+
+    # Case A: ingest is None
+    state_none = MockSessionState({"ingest": None})
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st:
+        mock_st.session_state = state_none
+        _clean_tab(cfg, user)
+        mock_st.info.assert_called_with("Import a table file first in '1. Import Data' to enable automated cleaning.")
+
+    # Case B: ingest has empty DataFrame
+    empty_ingest = IngestResult(
+        frame=pd.DataFrame(),
+        source_name="empty.csv",
+        source_kind="csv",
+    )
+    state_empty = MockSessionState({"ingest": empty_ingest})
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st:
+        mock_st.session_state = state_empty
+        _clean_tab(cfg, user)
+        assert mock_st.success.called
+        assert "No automated cleaning operations are required" in mock_st.success.call_args[0][0]
+
+    # Case C: clean DataFrame with 0 issues
+    clean_df = pd.DataFrame({"Name": ["Alpha", "Beta"], "Score": [10, 20]})
+    clean_ingest = IngestResult(
+        frame=clean_df,
+        source_name="clean.csv",
+        source_kind="csv",
+    )
+    state_clean = MockSessionState({"ingest": clean_ingest})
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st:
+        mock_st.session_state = state_clean
+        _clean_tab(cfg, user)
+        assert mock_st.success.called
+
+
+def test_clean_tab_handles_malformed_recommendations_gracefully() -> None:
+    """7. The Clean Data page handles unexpected or dictionary recommendation objects safely."""
+    from unittest.mock import patch
+    from private_analyst.auth.users import User
+    from private_analyst.config import load_config
+    from private_analyst.ui.streamlit_app import _clean_tab
+
+    cfg = load_config()
+    user = User(id=1, org_id="test-org", username="analyst", role="analyst")
+
+    dummy_df = pd.DataFrame({"Col": [1, 2]})
+    dummy_ingest = IngestResult(
+        frame=dummy_df,
+        source_name="dummy.csv",
+        source_kind="csv",
+    )
+
+    malformed_recs = [
+        {"id": "dict_op", "title": "Dict Op", "is_lossy": False, "description": "Dict desc"},
+        {"id": "", "title": "Empty ID"},  # Should be skipped safely
+        CleaningRecommendation(
+            id="partial_obj",
+            title="Partial Obj",
+            category="Other",
+            description="",
+            affected_rows_count=None,
+        ),
+    ]
+
+    state = MockSessionState({"ingest": dummy_ingest})
+    with patch("private_analyst.ui.streamlit_app.st") as mock_st, \
+         patch("private_analyst.ui.streamlit_app.generate_cleaning_recommendations", return_value=malformed_recs):
+        mock_st.session_state = state
+        mock_st.button.return_value = False
+        _clean_tab(cfg, user)
+        # Check that checkbox was rendered for valid recs without crashing
+        assert mock_st.checkbox.called

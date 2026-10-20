@@ -503,6 +503,26 @@ def _quality_tab(cfg, user: User) -> None:
             st.dataframe(ingest.frame[dup_mask].head(100), use_container_width=True)
 
 
+def _format_cleaning_rec_label(r: Any) -> tuple[str, str]:
+    """Format checkbox label and retrieve operation id safely."""
+    rec_id = getattr(r, "id", None) if not isinstance(r, dict) else r.get("id")
+    title = getattr(r, "title", "Cleaning Step") if not isinstance(r, dict) else r.get("title", "Cleaning Step")
+    desc = getattr(r, "description", "") if not isinstance(r, dict) else r.get("description", "")
+    rows_count = getattr(r, "affected_rows_count", None) if not isinstance(r, dict) else r.get("affected_rows_count")
+
+    detail = f" — {desc}" if desc else ""
+    if rows_count is not None and isinstance(rows_count, (int, float)) and rows_count > 0:
+        aff = f" ({int(rows_count):,} affected)"
+    else:
+        aff = ""
+
+    is_lossy = getattr(r, "is_lossy", False) if not isinstance(r, dict) else r.get("is_lossy", False)
+    prefix = "⚠️ **[Lossy] " if is_lossy else "**"
+    suffix = "**" if is_lossy else "**"
+    label = f"{prefix}{title}{suffix}{detail}{aff}"
+    return label, str(rec_id or "")
+
+
 def _clean_tab(cfg, user: User) -> None:
     st.header("3. Clean Data & Automation Pipeline")
     st.caption("Review deterministic cleaning plans, apply automated transformations, and track the audit trail.")
@@ -517,8 +537,8 @@ def _clean_tab(cfg, user: User) -> None:
     st.subheader("Automated Cleaning Recommendations")
     st.caption("The engine recommends targeted transformations to normalize strings, repair headers, and address missing data.")
 
-    safe_recs = [r for r in recs if not r.is_lossy]
-    lossy_recs = [r for r in recs if r.is_lossy]
+    safe_recs = [r for r in recs if not getattr(r, "is_lossy", False)]
+    lossy_recs = [r for r in recs if getattr(r, "is_lossy", False)]
 
     selected_ids: list[str] = []
 
@@ -528,37 +548,45 @@ def _clean_tab(cfg, user: User) -> None:
         if safe_recs:
             st.markdown("#### Safe Transformations (Preserves All Records)")
             for r in safe_recs:
-                detail = f" — {r.description}" if r.description else ""
-                aff = f" ({r.affected_count} affected)" if r.affected_count else ""
+                label, rec_id = _format_cleaning_rec_label(r)
+                if not rec_id:
+                    continue
+                default_val = getattr(r, "default_enabled", True) if not isinstance(r, dict) else r.get("default_enabled", True)
                 checked = st.checkbox(
-                    f"**{r.title}**{detail}{aff}",
-                    value=True,
-                    key=f"clean_rec_{r.op_id}",
+                    label,
+                    value=bool(default_val),
+                    key=f"clean_rec_{rec_id}",
                 )
                 if checked:
-                    selected_ids.append(r.op_id)
+                    selected_ids.append(rec_id)
 
         if lossy_recs:
             st.markdown("#### Cautionary / Lossy Actions (Removes Records or Columns)")
             for r in lossy_recs:
-                detail = f" — {r.description}" if r.description else ""
-                aff = f" ({r.affected_count} affected)" if r.affected_count else ""
+                label, rec_id = _format_cleaning_rec_label(r)
+                if not rec_id:
+                    continue
+                default_val = getattr(r, "default_enabled", False) if not isinstance(r, dict) else r.get("default_enabled", False)
                 checked = st.checkbox(
-                    f"⚠️ **[Lossy] {r.title}**{detail}{aff}",
-                    value=False,
-                    key=f"clean_rec_{r.op_id}",
+                    label,
+                    value=bool(default_val),
+                    key=f"clean_rec_{rec_id}",
                 )
                 if checked:
-                    selected_ids.append(r.op_id)
+                    selected_ids.append(rec_id)
 
         if st.button("Apply Selected Cleaning Plan", type="primary"):
             if not selected_ids:
                 st.warning("Please select at least one cleaning operation to apply.")
             else:
-                summary = apply_cleaning_plan(ingest.frame, selected_ids)
-                ingest.frame = summary.after_frame
-                ingest.working_frame = summary.after_frame
-                for op in summary.operations:
+                rows_before = int(ingest.frame.shape[0])
+                cols_before = int(ingest.frame.shape[1])
+                updated_frame, applied_ops = apply_cleaning_plan(ingest.frame, selected_ids)
+                rows_after = int(updated_frame.shape[0])
+                cols_after = int(updated_frame.shape[1])
+                ingest.frame = updated_frame
+                ingest.working_frame = updated_frame
+                for op in applied_ops:
                     if hasattr(ingest, "add_cleaning_operation"):
                         ingest.add_cleaning_operation(op)
                     elif hasattr(ingest, "cleaning_log"):
@@ -572,15 +600,15 @@ def _clean_tab(cfg, user: User) -> None:
                         user.org_id,
                         user.username,
                         "clean_dataset",
-                        f"Ops: {len(summary.operations)}, Shape: {summary.rows_before}x{summary.cols_before}->{summary.rows_after}x{summary.cols_after}",
+                        f"Ops: {len(applied_ops)}, Shape: {rows_before}x{cols_before}->{rows_after}x{cols_after}",
                     )
                 except AuditLogError:
                     pass
 
                 st.success(
-                    f"Successfully applied {len(summary.operations)} cleaning operations! "
-                    f"Dataset transformed from ({summary.rows_before:,} × {summary.cols_before}) "
-                    f"to ({summary.rows_after:,} × {summary.cols_after})."
+                    f"Successfully applied {len(applied_ops)} cleaning operation(s)! "
+                    f"Dataset transformed from ({rows_before:,} × {cols_before}) "
+                    f"to ({rows_after:,} × {cols_after})."
                 )
                 st.rerun()
 
