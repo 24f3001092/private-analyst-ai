@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import csv
 import io
 import re
 from dataclasses import dataclass, field
@@ -278,6 +279,25 @@ def inspect_workbook(data: bytes, filename: str) -> WorkbookInfo | None:
         )
     except Exception:
         return None
+
+
+def detect_delimiter(sample: str) -> str:
+    """Detect CSV delimiter using csv.Sniffer with heuristic fallback."""
+    if not sample:
+        return ","
+    valid_delimiters = (",", ";", "\t", "|")
+    try:
+        dialect = csv.Sniffer().sniff(sample[:2048], delimiters=",;\t|")
+        if dialect.delimiter in valid_delimiters:
+            return dialect.delimiter
+    except Exception:
+        pass
+    lines = [line for line in sample.splitlines() if line.strip()][:15]
+    if not lines:
+        return ","
+    counts = {c: sum(line.count(c) for line in lines) for c in valid_delimiters}
+    best = max(counts, key=counts.get)
+    return best if counts[best] > 0 else ","
 
 
 def detect_header_row_from_raw(df_raw: pd.DataFrame) -> tuple[int, str | None]:
@@ -652,16 +672,48 @@ def load_tabular(
     try:
         if suffix == ".csv":
             try:
-                df_raw = pd.read_csv(io.BytesIO(data), header=None, nrows=25, on_bad_lines="skip", engine="python")
-                if header_row is None:
-                    h_idx, detected_title = detect_header_row_from_raw(df_raw)
-                else:
-                    h_idx = header_row
-            except Exception:
-                h_idx = 0
-                df_raw = None
-            frame = pd.read_csv(io.BytesIO(data), header=h_idx, on_bad_lines="error", engine="python")
-            raw_shape = (len(frame) + h_idx + 1, frame.shape[1])
+                text = data.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = data.decode("latin-1")
+
+            delim = detect_delimiter(text[:4096])
+            reader = csv.reader(io.StringIO(text), delimiter=delim)
+            raw_rows: list[list[Any]] = []
+            for idx, row in enumerate(reader):
+                if idx > limits.max_rows + 200:
+                    break
+                raw_rows.append(row)
+
+            if not raw_rows:
+                raise ValidationError("The table has no rows.")
+
+            max_cols = max((len(r) for r in raw_rows), default=0)
+            if max_cols == 0:
+                raise ValidationError("The table has no columns.")
+
+            padded_raw = []
+            for r in raw_rows:
+                padded_r = [val if val and str(val).strip() else None for val in r]
+                if len(padded_r) < max_cols:
+                    padded_r.extend([None] * (max_cols - len(padded_r)))
+                padded_raw.append(padded_r)
+
+            df_raw = pd.DataFrame(padded_raw)
+            raw_shape = df_raw.shape
+
+            if header_row is None:
+                h_idx, detected_title = detect_header_row_from_raw(df_raw)
+            else:
+                h_idx = header_row
+
+            frame = pd.read_csv(
+                io.StringIO(text),
+                sep=delim,
+                header=h_idx,
+                skip_blank_lines=False,
+                on_bad_lines="skip",
+                engine="python",
+            )
         else:
             excel_file = pd.ExcelFile(buffer, engine="openpyxl")
             available_sheets = excel_file.sheet_names

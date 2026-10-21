@@ -131,7 +131,7 @@ def _prepare_ml_matrix(
             uniq = int(series.nunique())
             if uniq > 20:
                 raise ValidationError(
-                    f"Feature column '{col}' is not numeric and has too many distinct values ({uniq}) for one-hot encoding."
+                    f"Feature column '{col}' is not numeric and has too many distinct values ({uniq}) for one-hot encoding. Select numeric or low-cardinality categorical features."
                 )
             dummies = pd.get_dummies(series, prefix=col, drop_first=True, dtype=float)
             encoded_parts.append(dummies)
@@ -151,74 +151,58 @@ def _prepare_ml_matrix(
     return X, y, final_selected, caveats, metadata
 
 
-def run_classification(
+def assess_feature_suitability(
     frame: pd.DataFrame,
-    target_col: str,
-    feature_cols: list[str] | None = None,
-) -> MLResult:
-    """Run deterministic decision tree classification with train/test metrics and categorical encoding."""
-    """Validate, clean, and encode feature columns for machine learning models."""
-    caveats: list[str] = []
-    metadata: dict[str, Any] = {}
+    target_col: str | None = None,
+) -> dict[str, Any]:
+    """Assess and categorize dataset columns for suitability in machine learning tasks."""
+    id_candidates = {"#", "id", "s.no", "sl.no", "sr.no", "index", "no", "unnamed: 0"}
+    suitable_numeric: list[str] = []
+    suitable_categorical: list[str] = []
+    high_cardinality_text: list[str] = []
+    identifiers: list[str] = []
+    constant_cols: list[str] = []
 
-    if feature_cols is None:
-        selected_features = [col for col in frame.columns if col != target_col and _is_numeric(frame[col])]
-    else:
-        for col in feature_cols:
-            if col not in frame.columns:
-                raise ValidationError("One or more feature columns are not in the loaded table.")
-        selected_features = [col for col in feature_cols if col != target_col]
+    total_rows = len(frame)
 
-    if not selected_features:
-        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+    for col in frame.columns:
+        if target_col is not None and col == target_col:
+            continue
 
-    cols_to_use = [target_col] + selected_features
-    clean_df = frame[cols_to_use].dropna().copy()
-    if clean_df.empty:
-        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+        c_str = str(col).lower().strip()
+        series = frame[col]
+        non_null = series.dropna()
+        n_unique = int(non_null.nunique())
 
-    encoded_parts: list[pd.DataFrame] = []
-    final_selected: list[str] = []
+        if n_unique <= 1:
+            constant_cols.append(col)
+            continue
 
-    for col in selected_features:
-        series = clean_df[col]
+        if c_str in id_candidates:
+            identifiers.append(col)
+            continue
+
         if _is_numeric(series):
-            # Check target leakage for numeric targets
-            if _is_numeric(clean_df[target_col]):
-                s_numeric = pd.to_numeric(series, errors="coerce")
-                t_numeric = pd.to_numeric(clean_df[target_col], errors="coerce")
-                valid_idx = s_numeric.notna() & t_numeric.notna()
-                if valid_idx.sum() >= 3:
-                    corr = float(s_numeric[valid_idx].corr(t_numeric[valid_idx]))
-                    if abs(corr) >= 0.999:
-                        caveats.append(
-                            f"Excluded feature '{col}' due to extreme target correlation ({corr:.4f}), which indicates target leakage."
-                        )
-                        continue
-            encoded_parts.append(clean_df[[col]].astype(float))
-            final_selected.append(col)
+            if total_rows > 10 and n_unique == total_rows and c_str in {"#", "no", "id", "num"}:
+                identifiers.append(col)
+            else:
+                suitable_numeric.append(col)
         else:
-            uniq = int(series.nunique())
-            if uniq > 20:
-                raise ValidationError(
-                    f"Feature column '{col}' is not numeric and has too many distinct values ({uniq}) for one-hot encoding."
-                )
-            dummies = pd.get_dummies(series, prefix=col, drop_first=True, dtype=float)
-            encoded_parts.append(dummies)
-            final_selected.append(col)
-            caveats.append(
-                f"Categorical feature '{col}' was automatically one-hot encoded into {len(dummies.columns)} binary indicators."
-            )
+            if 2 <= n_unique <= 20:
+                suitable_categorical.append(col)
+            else:
+                high_cardinality_text.append(col)
 
-    if not encoded_parts:
-        return pd.DataFrame(), pd.Series(dtype=object), [], caveats, metadata
+    recommended = suitable_numeric + suitable_categorical
 
-    X = pd.concat(encoded_parts, axis=1)
-    y = clean_df[target_col]
-    metadata["row_count"] = int(clean_df.shape[0])
-    metadata["encoded_columns"] = list(X.columns)
-
-    return X, y, final_selected, caveats, metadata
+    return {
+        "suitable_numeric": suitable_numeric,
+        "suitable_categorical": suitable_categorical,
+        "high_cardinality_text": high_cardinality_text,
+        "identifiers": identifiers,
+        "constant": constant_cols,
+        "recommended_features": recommended,
+    }
 
 
 def run_classification(

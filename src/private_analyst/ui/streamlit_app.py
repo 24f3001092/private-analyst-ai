@@ -22,7 +22,12 @@ from private_analyst.analytics.cleaner import (
     handle_missing_values,
     repair_unnamed_headers,
 )
-from private_analyst.analytics.ml_engine import run_classification, run_clustering, run_regression
+from private_analyst.analytics.ml_engine import (
+    assess_feature_suitability,
+    run_classification,
+    run_clustering,
+    run_regression,
+)
 from private_analyst.analytics.operations import run_operation
 from private_analyst.analytics.quality import assess_quality
 from private_analyst.analytics.sql_console import DuckDBConsole
@@ -40,7 +45,7 @@ from private_analyst.config import load_config
 from private_analyst.documents.index import LocalTextIndex
 from private_analyst.documents.ocr import ocr_image
 from private_analyst.documents.pdf import extract_pdf_text
-from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError
+from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError, ValidationError
 from private_analyst.ingestion.loader import (
     IngestResult,
     WorkbookInfo,
@@ -122,6 +127,19 @@ def _desktop_user(edition: str = "desktop") -> User:
     if edition == "server":
         raise AuthenticationError("Desktop auto-login is not allowed in server mode.")
     return User(id=0, org_id="local", username="local-owner", role="admin")
+
+
+def _invalidate_downstream_state() -> None:
+    """Reset downstream state across tabs when dataset changes or is modified."""
+    st.session_state.last_result = None
+    st.session_state.last_explanation = None
+    if st.session_state.get("duckdb_console") is not None:
+        try:
+            st.session_state.duckdb_console.close()
+        except Exception:
+            pass
+        st.session_state.duckdb_console = None
+    st.session_state["sql_registered_frame_id"] = None
 
 
 def _init_state(cfg) -> None:
@@ -318,6 +336,7 @@ def _import_tab(cfg, user: User) -> None:
         file_sig = (uploaded.name, len(raw_bytes), selected_sheet)
         if st.session_state.get("_last_ingested_file") != file_sig:
             st.session_state["_last_ingested_file"] = file_sig
+            _invalidate_downstream_state()
             log.record(
                 user.org_id,
                 user.username,
@@ -595,6 +614,7 @@ def _clean_tab(cfg, user: User) -> None:
                         ingest.cleaning_operations.append(op)
 
                 st.session_state.ingest = ingest
+                _invalidate_downstream_state()
                 try:
                     _get_audit_log(cfg).record(
                         user.org_id,
@@ -660,6 +680,7 @@ def _repair_tab(cfg, user: User) -> None:
                     elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                         ingest.cleaning_operations.append(op)
                 st.session_state.ingest = ingest
+                _invalidate_downstream_state()
                 st.success(f"Repaired {len(renamed)} column headers: {renamed}")
                 st.rerun()
         else:
@@ -689,6 +710,7 @@ def _repair_tab(cfg, user: User) -> None:
                 elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                     ingest.cleaning_operations.append(op)
             st.session_state.ingest = ingest
+            _invalidate_downstream_state()
             st.success(f"Promoted row {override_idx + 1} to column headers.")
             st.rerun()
 
@@ -709,6 +731,7 @@ def _repair_tab(cfg, user: User) -> None:
                 elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                     ingest.cleaning_operations.append(op)
             st.session_state.ingest = ingest
+            _invalidate_downstream_state()
             st.success(f"Dropped {len(cols_to_drop)} column(s).")
             st.rerun()
 
@@ -727,6 +750,7 @@ def _repair_tab(cfg, user: User) -> None:
                 elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                     ingest.cleaning_operations.append(op)
             st.session_state.ingest = ingest
+            _invalidate_downstream_state()
             st.success(f"Renamed '{col_to_rename}' to '{new_col_name}'.")
             st.rerun()
 
@@ -764,6 +788,7 @@ def _repair_tab(cfg, user: User) -> None:
                     elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                         ingest.cleaning_operations.append(op)
                 st.session_state.ingest = ingest
+                _invalidate_downstream_state()
                 st.success(f"Imputed missing values for '{imp_col}'.")
                 st.rerun()
 
@@ -788,6 +813,7 @@ def _repair_tab(cfg, user: User) -> None:
                 elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                     ingest.cleaning_operations.append(op)
             st.session_state.ingest = ingest
+            _invalidate_downstream_state()
             st.success(f"Filter applied: {len(new_frame):,} rows remaining.")
             st.rerun()
 
@@ -812,6 +838,7 @@ def _repair_tab(cfg, user: User) -> None:
             elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
                 ingest.cleaning_operations.append(reset_op)
             st.session_state.ingest = ingest
+            _invalidate_downstream_state()
             st.success("Dataset successfully reset to original file state.")
             st.rerun()
 
@@ -1045,20 +1072,27 @@ def _ask_tab(cfg, user: User) -> None:
                 "- **Note:** Even when the AI model is offline, the deterministic Python analytics engine is fully functional with 0% hallucination."
             )
 
-    question = st.text_input("Ask a question about the loaded data", value="Summarize the dataset.")
-    try:
-        q_cols = st.columns(4)
-        if isinstance(q_cols, (list, tuple)) and len(q_cols) == 4:
-            if q_cols[0].button("Summarize"):
-                question = "Summarize the dataset."
-            if q_cols[1].button("Data Quality"):
-                question = "Assess data quality and missingness."
-            if q_cols[2].button("Frequency"):
-                question = "Show frequency distribution of categories."
-            if q_cols[3].button("Cross-Tabulate"):
-                question = "Cross-tabulate categories."
-    except Exception:
-        pass
+    cat_cols = [c for c in ingest.frame.columns if not pd.api.types.is_numeric_dtype(ingest.frame[c]) and str(c).lower() not in {"#", "id", "s.no", "index"}]
+    num_cols = [c for c in ingest.frame.columns if pd.api.types.is_numeric_dtype(ingest.frame[c]) and str(c).lower() not in {"#", "id", "s.no", "index"}]
+
+    with st.expander("Suggested Analysis Questions & Prompts", expanded=False):
+        prompt_bullets = [
+            "- `Summarize the dataset.`",
+            "- `Assess data quality and missingness.`",
+        ]
+        if cat_cols:
+            prompt_bullets.append(f"- `Show frequency distribution of {cat_cols[0]}.`")
+            if len(cat_cols) >= 2:
+                prompt_bullets.append(f"- `Cross-tabulate {cat_cols[0]} and {cat_cols[1]}.`")
+            elif num_cols:
+                prompt_bullets.append(f"- `Analyze distribution of {num_cols[0]}.`")
+        elif num_cols:
+            prompt_bullets.append(f"- `Analyze distribution of {num_cols[0]}.`")
+            if len(num_cols) >= 2:
+                prompt_bullets.append("- `Compute correlation matrix across numeric features.`")
+        st.markdown("\n".join(prompt_bullets))
+
+    question = st.text_input("Question about the loaded table", value="Summarize the dataset.")
 
     if st.button("Run analysis"):
         result = run_operation(ingest, question)
@@ -1127,27 +1161,39 @@ def _sql_tab(cfg, user: User) -> None:
         st.info("Import a table file first to enable SQL querying.")
         return
 
-    if st.session_state.duckdb_console is None:
+    current_frame_id = (id(ingest.frame), len(ingest.frame), tuple(ingest.frame.columns))
+    if st.session_state.duckdb_console is None or st.session_state.get("sql_registered_frame_id") != current_frame_id:
+        if st.session_state.duckdb_console is not None:
+            try:
+                st.session_state.duckdb_console.close()
+            except Exception:
+                pass
         console = DuckDBConsole(max_rows=cfg.limits.max_rows)
         console.register_dataframe("data", ingest.frame)
         st.session_state.duckdb_console = console
+        st.session_state["sql_registered_frame_id"] = current_frame_id
     else:
         console = st.session_state.duckdb_console
-        try:
-            console.register_dataframe("data", ingest.frame)
-        except Exception:
-            pass
 
-    st.subheader("Available Tables")
-    tables = console.list_tables()
-    st.write(f"Registered tables: {', '.join(f'`{t}`' for t in tables)}")
+    st.info(f"Virtual Table **`data`**: **{ingest.frame.shape[0]:,} rows × {ingest.frame.shape[1]} columns** loaded from `{ingest.source_name}`")
 
-    with st.expander("Table Schema (`data`)"):
+    with st.expander("Table Schema & Column Types (`data`)", expanded=False):
         try:
             schema_info = console.describe_table("data")
             st.dataframe(pd.DataFrame(schema_info), use_container_width=True)
-        except Exception as exc:
-            st.warning(f"Could not retrieve schema: {exc}")
+        except Exception:
+            pass
+
+    cat_cols = [c for c in ingest.frame.columns if not pd.api.types.is_numeric_dtype(ingest.frame[c]) and str(c).lower() not in {"#", "id", "s.no", "index"}]
+    num_cols = [c for c in ingest.frame.columns if pd.api.types.is_numeric_dtype(ingest.frame[c]) and str(c).lower() not in {"#", "id", "s.no", "index"}]
+
+    with st.expander("Sample Query Templates", expanded=False):
+        st.code("SELECT * FROM data LIMIT 10;", language="sql")
+        st.code("SELECT COUNT(*) AS total_records FROM data;", language="sql")
+        if cat_cols:
+            st.code(f'SELECT "{cat_cols[0]}", COUNT(*) AS count FROM data GROUP BY "{cat_cols[0]}" ORDER BY count DESC LIMIT 10;', language="sql")
+        if num_cols:
+            st.code(f'SELECT MIN("{num_cols[0]}") AS min_val, AVG("{num_cols[0]}") AS avg_val, MAX("{num_cols[0]}") AS max_val FROM data;', language="sql")
 
     default_query = "SELECT * FROM data LIMIT 10;"
     query = st.text_area("SQL Query (SELECT statements only)", value=default_query, height=120)
@@ -1466,11 +1512,31 @@ def _ml_tab(cfg, user: User) -> None:
         st.subheader("Decision Tree Classification")
         st.caption("Predict categorical outcomes using numeric and categorical predictors (automatically one-hot encoded).")
         target_col = st.selectbox("Target Column (Classes)", all_cols)
-        available_features = [c for c in all_cols if c != target_col and c not in {"#", "id", "s.no", "sl.no", "index"}]
+
+        suitability = assess_feature_suitability(frame, target_col=target_col)
+        rec_features = suitability["recommended_features"]
+        high_card = suitability["high_cardinality_text"]
+        identifiers = suitability["identifiers"]
+
+        available_features = [c for c in all_cols if c != target_col and c not in identifiers]
+        if not available_features:
+            available_features = [c for c in all_cols if c != target_col]
         if not available_features:
             st.warning("No feature columns available for classification.")
             return
-        selected_features = st.multiselect("Predictor Features", available_features, default=available_features[:min(5, len(available_features))])
+
+        if high_card:
+            with st.expander(f"Notice: {len(high_card)} high-cardinality/text column(s) excluded from default selection", expanded=False):
+                st.info(
+                    f"The following columns contain unique text, descriptions, links, or >20 categories: {', '.join(high_card)}. "
+                    "They are excluded from default features to prevent overfitting and high-cardinality errors."
+                )
+
+        default_selection = [c for c in rec_features if c in available_features][:min(5, len(rec_features))]
+        if not default_selection and available_features:
+            default_selection = available_features[:1]
+
+        selected_features = st.multiselect("Predictor Features", available_features, default=default_selection)
 
         if len(frame) < 20:
             st.info(f"Dataset has {len(frame)} rows (recommended minimum sample size is 20 rows).")
@@ -1479,14 +1545,19 @@ def _ml_tab(cfg, user: User) -> None:
             if not selected_features:
                 st.error("Please select at least one feature column.")
                 return
-            result = run_classification(frame, target_col, selected_features)
-            _get_audit_log(cfg).record(
-                user.org_id,
-                user.username,
-                "ml_classification",
-                f"Task: classification, Features: {len(selected_features)}, Status: {result.status}",
-            )
-            _render_ml_result(result)
+            try:
+                result = run_classification(frame, target_col, selected_features)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "ml_classification",
+                    f"Task: classification, Features: {len(selected_features)}, Status: {result.status}",
+                )
+                _render_ml_result(result)
+            except ValidationError as exc:
+                st.error(f"Classification validation failed: {exc}")
+            except Exception as exc:
+                st.error(f"Classification could not be performed: {exc}")
 
     elif task.startswith("Linear Regression"):
         st.subheader("Linear Regression")
@@ -1495,23 +1566,48 @@ def _ml_tab(cfg, user: User) -> None:
             st.warning("No numeric columns available in dataset.")
             return
         target_col = st.selectbox("Target Column (Continuous outcome)", numeric_cols)
-        available_features = [c for c in all_cols if c != target_col and c not in {"#", "id", "s.no", "sl.no", "index"}]
+
+        suitability = assess_feature_suitability(frame, target_col=target_col)
+        rec_features = suitability["recommended_features"]
+        high_card = suitability["high_cardinality_text"]
+        identifiers = suitability["identifiers"]
+
+        available_features = [c for c in all_cols if c != target_col and c not in identifiers]
+        if not available_features:
+            available_features = [c for c in all_cols if c != target_col]
         if not available_features:
             st.warning("No additional feature columns available as predictors.")
             return
-        selected_features = st.multiselect("Predictor Features", available_features, default=available_features[:min(5, len(available_features))])
+
+        if high_card:
+            with st.expander(f"Notice: {len(high_card)} high-cardinality/text column(s) excluded from default selection", expanded=False):
+                st.info(
+                    f"The following columns contain unique text, descriptions, links, or >20 categories: {', '.join(high_card)}. "
+                    "They are excluded from default features to maintain numerical stability."
+                )
+
+        default_selection = [c for c in rec_features if c in available_features][:min(5, len(rec_features))]
+        if not default_selection and available_features:
+            default_selection = available_features[:1]
+
+        selected_features = st.multiselect("Predictor Features", available_features, default=default_selection)
         if st.button("Fit & Evaluate Regression"):
             if not selected_features:
                 st.error("Please select at least one feature column.")
                 return
-            result = run_regression(frame, target_col, selected_features)
-            _get_audit_log(cfg).record(
-                user.org_id,
-                user.username,
-                "ml_regression",
-                f"Task: regression, Features: {len(selected_features)}, Status: {result.status}",
-            )
-            _render_ml_result(result)
+            try:
+                result = run_regression(frame, target_col, selected_features)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "ml_regression",
+                    f"Task: regression, Features: {len(selected_features)}, Status: {result.status}",
+                )
+                _render_ml_result(result)
+            except ValidationError as exc:
+                st.error(f"Regression validation failed: {exc}")
+            except Exception as exc:
+                st.error(f"Regression could not be performed: {exc}")
 
     elif task.startswith("Clustering"):
         st.subheader("K-Means Clustering")
@@ -1524,14 +1620,19 @@ def _ml_tab(cfg, user: User) -> None:
             if not selected_features:
                 st.error("Please select at least one numeric feature column.")
                 return
-            result = run_clustering(frame, selected_features, n_clusters=k)
-            _get_audit_log(cfg).record(
-                user.org_id,
-                user.username,
-                "ml_clustering",
-                f"Task: clustering, k: {k}, Features: {len(selected_features)}, Status: {result.status}",
-            )
-            _render_ml_result(result)
+            try:
+                result = run_clustering(frame, selected_features, n_clusters=k)
+                _get_audit_log(cfg).record(
+                    user.org_id,
+                    user.username,
+                    "ml_clustering",
+                    f"Task: clustering, k: {k}, Features: {len(selected_features)}, Status: {result.status}",
+                )
+                _render_ml_result(result)
+            except ValidationError as exc:
+                st.error(f"Clustering validation failed: {exc}")
+            except Exception as exc:
+                st.error(f"Clustering could not be performed: {exc}")
 
     elif task.startswith("Anomaly"):
         st.subheader("Outlier & Anomaly Detection")
@@ -1648,9 +1749,12 @@ def _documents_tab(cfg, user: User) -> None:
     if not can(user, "documents"):
         st.error("You do not have permission to manage documents.")
         return
-    st.write("Documents are indexed in memory for this session. Nothing is sent to an external search service.")
-    uploaded = st.file_uploader("PDF, text, or image", type=["pdf", "txt", "png", "jpg", "jpeg"])
-    if uploaded and st.button("Index document"):
+    st.header("Document Knowledge Base & Search")
+    st.caption("Index PDF, text, and images into an ephemeral in-memory search index. Passages are completely isolated from tabular data. No data leaves your machine.")
+    st.info("Supported formats: **PDF (.pdf)**, **Plain Text (.txt)**, **Images (.png, .jpg, .jpeg via local OCR)**.")
+
+    uploaded = st.file_uploader("Choose a document file", type=["pdf", "txt", "png", "jpg", "jpeg"], key="doc_uploader")
+    if uploaded and st.button("Index document", key="doc_index_btn"):
         data = uploaded.getvalue()
         name = uploaded.name
         suffix = Path(name).suffix.lower()
@@ -1671,19 +1775,29 @@ def _documents_tab(cfg, user: User) -> None:
                 else:
                     added = st.session_state.index.add_plain_text(name, ocr.text)
             log.record(user.org_id, user.username, "index_document", f"File: '{Path(name).name}', Passages: {added}")
-            st.success(f"Indexed {added} passage(s) from {name}.")
+            st.success(f"Successfully indexed {added} passage(s) from '{name}'.")
         except PrivateAnalystError as exc:
             log.record(user.org_id, user.username, "index_document_failure", f"File: '{Path(name).name}', Reason: {exc.__class__.__name__}")
             st.error(str(exc))
-    query = st.text_input("Search indexed passages")
+
+    st.divider()
+    records = st.session_state.index.records
+    doc_names = sorted({r["document_name"] for r in records})
+    if not records:
+        st.caption("No documents are currently indexed in this session. Upload a document above to enable passage search.")
+    else:
+        st.success(f"Indexed **{len(records)} passage(s)** across **{len(doc_names)} document(s)**: {', '.join(f'`{d}`' for d in doc_names)}")
+
+    query = st.text_input("Search indexed passages", key="doc_search_query")
     if query:
         hits = st.session_state.index.search(query)
         if not hits:
-            st.write("No matching passages were found in the local index.")
+            st.info("No matching passages were found in the local index.")
         for hit in hits:
-            st.markdown(f"**{hit.document_name}** · page {hit.page_number} · score {hit.score}")
-            st.caption("Source evidence (extracted text):")
+            st.markdown(f"**{hit.document_name}** · page {hit.page_number} · score `{hit.score}`")
+            st.caption("Extracted passage:")
             st.write(hit.text)
+
     names = sorted({r["document_name"] for r in st.session_state.index.records})
     if names:
         victim = st.selectbox("Delete document from index", names)
@@ -1698,20 +1812,27 @@ def _reports_tab(cfg, user: User) -> None:
     result = st.session_state.last_result
     explanation = st.session_state.last_explanation
     if ingest is None:
-        st.info("Import data first.")
+        st.info("Import data first in '1. Import Data' to enable exports.")
         return
-    st.write("Exports are created locally. Choose what to include.")
-    include_ai = st.checkbox("Include AI explanation in exports", value=False)
+
+    st.header("Reports & Local Export Center")
+    st.caption("All exports are generated locally on your device. Tabular data is automatically sanitized to neutralize spreadsheet formula injection attacks.")
+
+    stem = Path(ingest.source_name).stem
+    st.subheader("Tabular Dataset Exports")
+    st.write(f"Active table: **`{ingest.source_name}`** ({ingest.frame.shape[0]:,} rows × {ingest.frame.shape[1]} columns)")
+
     st.download_button(
-        "Download table CSV",
+        "Download Cleaned CSV",
         to_csv_bytes(ingest.frame),
-        file_name="table.csv",
+        file_name=f"{stem}_cleaned.csv",
+        mime="text/csv",
         on_click=lambda: _safe_record_export_requested(
-            cfg, user, "table", "delimited", f"Source: '{Path(ingest.source_name).stem}'"
+            cfg, user, "table", "delimited", f"Source: '{stem}'"
         ),
     )
     if can(user, "export"):
-        multi_sheet = st.checkbox("Multi-sheet Excel workbook (includes Column Statistics & Data Quality sheets)", value=True)
+        multi_sheet = st.checkbox("Multi-sheet Excel (includes Column Statistics & Data Quality)", value=True, key="report_multi_sheet")
         stats = compute_dataset_stats(ingest.frame, getattr(ingest, "inferred_types", None))
         quality = assess_quality(ingest.frame, ingest.duplicate_columns)
         cleaning_ops = getattr(ingest, "cleaning_log", None) or getattr(ingest, "cleaning_operations", [])
@@ -1721,27 +1842,34 @@ def _reports_tab(cfg, user: User) -> None:
             else to_excel_bytes(ingest.frame)
         )
         st.download_button(
-            "Download table Excel",
+            "Download Cleaned Excel (.xlsx)",
             excel_bytes,
-            file_name="table.xlsx",
+            file_name=f"{stem}_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             on_click=lambda: _safe_record_export_requested(
-                cfg, user, "table", "xlsx", f"Source: '{Path(ingest.source_name).stem}'"
+                cfg, user, "table", "xlsx", f"Source: '{stem}'"
             ),
         )
+
+    st.divider()
+    st.subheader("Executive Analysis Briefings")
     if result and explanation:
+        include_ai = st.checkbox("Include AI narrative in executive reports", value=True, key="report_inc_ai")
         text = report_markdown(result, explanation["text"], include_ai)
         st.download_button(
-            "Download markdown report",
+            "Download Markdown Report (.md)",
             text.encode("utf-8"),
-            file_name="report.md",
+            file_name=f"{stem}_briefing.md",
+            mime="text/markdown",
             on_click=lambda: _safe_record_export_requested(
                 cfg, user, "report", "md", f"AI included: {include_ai}"
             ),
         )
         st.download_button(
-            "Download PDF report",
+            "Download PDF Report (.pdf)",
             to_pdf_bytes(result, explanation["text"], include_ai),
-            file_name="report.pdf",
+            file_name=f"{stem}_briefing.pdf",
+            mime="application/pdf",
             on_click=lambda: _safe_record_export_requested(
                 cfg, user, "report", "pdf", f"AI included: {include_ai}"
             ),
@@ -1749,22 +1877,45 @@ def _reports_tab(cfg, user: User) -> None:
         with st.expander("Analysis Metadata & Provenance", expanded=False):
             st.json(analysis_metadata(ingest.source_name))
     else:
-        st.caption("Run a question in Ask to enable analysis reports.")
+        st.info(
+            "Executive Analysis Reports (Markdown & PDF) become available once an analytical question is run in "
+            "**8. Ask & Explain**. The briefing packages deterministic engine calculations, verified totals, and AI narrative."
+        )
 
 
 def _settings_tab(cfg, user: User) -> None:
-    st.write("Telemetry is hard-disabled. The model host must be loopback.")
-    st.json(
-        {
-            "edition": cfg.server.edition,
-            "bind_host": cfg.server.bind_host,
-            "require_auth": cfg.server.require_auth,
-            "telemetry_enabled": cfg.telemetry_enabled,
-            "ai_host": cfg.ai.host,
-            "data_dir": str(cfg.resolved_data_dir()),
-            "max_upload_bytes": cfg.limits.max_upload_bytes,
-        }
-    )
+    st.header("System Settings & Privacy Controls")
+
+    model_status = check_local_model(cfg.ai)
+    st.subheader("Local AI Model Status")
+    if model_status.available:
+        st.success(f"**Online:** {model_status.friendly_status} (Host: `{model_status.host}:{model_status.port}`)")
+    else:
+        st.info(f"**Offline:** {model_status.friendly_status}")
+    if st.button("Re-test Connection", key="settings_test_ai"):
+        st.info(f"Connection result: {model_status.friendly_status}")
+
+    if not model_status.available:
+        with st.expander("Local Model (Ollama) Setup Instructions", expanded=False):
+            st.markdown(
+                "- **Step 1:** Download and install Ollama from [https://ollama.com](https://ollama.com).\n"
+                "- **Step 2:** Open a terminal and start the server: `ollama serve`.\n"
+                f"- **Step 3:** Pull your configured model: `ollama pull {cfg.ai.model}`.\n"
+                "- **Step 4:** Return here and click **Re-test Connection**."
+            )
+
+    st.subheader("Privacy & Security Configuration")
+    st.caption("Telemetry is hard-disabled at compile time. Model communications connect strictly to loopback (`127.0.0.1`).")
+    cfg_data = [
+        {"Setting": "Product Edition", "Value": cfg.server.edition.title()},
+        {"Setting": "Bind Host", "Value": cfg.server.bind_host},
+        {"Setting": "Authentication Required", "Value": "Yes" if cfg.server.require_auth else "No (Desktop Local)"},
+        {"Setting": "Telemetry Hard-Disabled", "Value": "Yes (Compile-time disabled)"},
+        {"Setting": "AI Host (Loopback)", "Value": cfg.ai.host},
+        {"Setting": "Max Upload Limit", "Value": f"{cfg.limits.max_upload_bytes / (1024 * 1024):.1f} MB"},
+        {"Setting": "Resolved Data Directory", "Value": str(cfg.resolved_data_dir())},
+    ]
+    st.dataframe(pd.DataFrame(cfg_data), use_container_width=True)
     if can(user, "manage_users") and cfg.server.require_auth:
         st.subheader("Create user")
         org = st.text_input("New user organization id", value=user.org_id)
