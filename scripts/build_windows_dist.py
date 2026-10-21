@@ -67,6 +67,8 @@ def build_distribution(
     folders = ["src", "scripts", "deploy", "docs", "samples", ".streamlit"]
     if include_tests:
         folders.append("tests")
+    if (ROOT / "wheelhouse").is_dir():
+        folders.append("wheelhouse")
 
     for folder in folders:
         src = ROOT / folder

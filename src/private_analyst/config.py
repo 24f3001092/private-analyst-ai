@@ -146,6 +146,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     if ai_host_env:
         cfg.ai.host = ai_host_env
 
+    ai_model_env = os.environ.get("PRIVATE_ANALYST_AI_MODEL", "").strip()
+    if ai_model_env:
+        cfg.ai.model = ai_model_env
+
     ai_port_env = os.environ.get("PRIVATE_ANALYST_AI_PORT", "").strip()
     if ai_port_env:
         try:
@@ -181,6 +185,13 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ValidationError(
             f"AI inference host '{cfg.ai.host}' is not allowed. Must be a local loopback address."
         )
+
+    # Validate model identifier format
+    cfg.ai.model = cfg.ai.model.strip()
+    if not cfg.ai.model:
+        raise ValidationError("AI model name cannot be empty.")
+    if any(c in cfg.ai.model for c in (" ", "\t", "\n", "\r", ";", "&", "|", "`", "$")):
+        raise ValidationError(f"Invalid AI model name '{cfg.ai.model}'. Control characters and whitespace are not allowed.")
 
     os.makedirs(cfg.resolved_data_dir(), exist_ok=True)
     os.makedirs(default_temp_dir(), exist_ok=True)

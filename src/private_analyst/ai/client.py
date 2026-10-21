@@ -10,6 +10,7 @@ from typing import Any
 
 from private_analyst.config import AIConfig
 from private_analyst.exceptions import ModelResponseError, ModelUnavailableError
+from private_analyst.security.network import assert_local_only
 
 
 @dataclass
@@ -60,9 +61,25 @@ def check_local_model(cfg: AIConfig) -> ModelStatus:
         return ModelStatus(False, cfg.runtime, cfg.host, cfg.model, type(exc).__name__, cfg.port)
 
 
+def verify_local_model(cfg: AIConfig, model_name: str | None = None) -> dict[str, Any]:
+    """Helper to verify local model metadata, architecture, parameters, and license."""
+    try:
+        return LocalModelClient(cfg).verify_model(model_name)
+    except Exception as exc:
+        return {
+            "verified": False,
+            "error": str(exc),
+            "detail": type(exc).__name__,
+        }
+
+
 class LocalModelClient:
     def __init__(self, cfg: AIConfig):
-        if cfg.host not in {"127.0.0.1", "localhost"}:
+        try:
+            assert_local_only(cfg.host)
+        except PermissionError as exc:
+            raise ModelUnavailableError("The model host must be a local loopback address.") from exc
+        if cfg.host not in {"127.0.0.1", "localhost", "::1"}:
             raise ModelUnavailableError("The model host must be a local loopback address.")
         self.cfg = cfg
         self.base = f"http://{cfg.host}:{cfg.port}"
@@ -77,6 +94,47 @@ class LocalModelClient:
             return ModelStatus(True, self.cfg.runtime, self.cfg.host, self.cfg.model, detail, self.cfg.port)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             return ModelStatus(False, self.cfg.runtime, self.cfg.host, self.cfg.model, type(exc).__name__, self.cfg.port)
+
+    def verify_model(self, model_name: str | None = None) -> dict[str, Any]:
+        """Verify local model metadata, architecture, quantization, and license via loopback API."""
+        target = model_name or self.cfg.model
+        body = json.dumps({"name": target}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base}/api/show",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=min(self.cfg.timeout_seconds, 5)) as resp:
+                payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return {
+                "verified": False,
+                "model": target,
+                "error": f"Local model runtime unreachable: {exc}",
+                "detail": type(exc).__name__,
+            }
+        except json.JSONDecodeError as exc:
+            return {
+                "verified": False,
+                "model": target,
+                "error": f"Invalid JSON response: {exc}",
+                "detail": "JSONDecodeError",
+            }
+
+        details = payload.get("details", {})
+        return {
+            "verified": True,
+            "model": target,
+            "format": details.get("format", "unknown"),
+            "family": details.get("family", "unknown"),
+            "parameter_size": details.get("parameter_size", "unknown"),
+            "quantization_level": details.get("quantization_level", "unknown"),
+            "modified_at": payload.get("modified_at", ""),
+            "license": payload.get("license", "Local open-weight license (refer to model card)"),
+            "parameters": payload.get("parameters", ""),
+        }
 
     def generate(self, prompt: str) -> str:
         body = json.dumps(

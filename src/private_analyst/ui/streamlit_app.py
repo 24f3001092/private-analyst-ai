@@ -9,7 +9,7 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
-from private_analyst.ai.client import check_local_model
+from private_analyst.ai.client import check_local_model, verify_local_model
 from private_analyst.ai.explainer import explain_results
 from private_analyst.analytics.anomalies import detect_iqr_anomalies, detect_zscore_anomalies, linear_trend_forecast
 from private_analyst.analytics.cleaner import (
@@ -1978,6 +1978,24 @@ def _settings_tab(cfg, user: User) -> None:
     if st.button("Re-test Connection", key="settings_test_ai"):
         st.info(f"Connection result: {model_status.friendly_status}")
 
+    if model_status.available:
+        if st.button("Verify Local Model Architecture & License", key="settings_verify_ai"):
+            with st.spinner("Inspecting model via loopback API..."):
+                v_res = verify_local_model(cfg.ai)
+                if v_res.get("verified"):
+                    st.success(f"**Verified Model:** `{v_res.get('model')}`")
+                    v_df = pd.DataFrame([
+                        {"Attribute": "Family / Architecture", "Value": str(v_res.get("family"))},
+                        {"Attribute": "Format", "Value": str(v_res.get("format"))},
+                        {"Attribute": "Parameter Count", "Value": str(v_res.get("parameter_size"))},
+                        {"Attribute": "Quantization Level", "Value": str(v_res.get("quantization_level"))},
+                        {"Attribute": "Modified Timestamp", "Value": str(v_res.get("modified_at"))},
+                        {"Attribute": "License Terms", "Value": str(v_res.get("license", "")).splitlines()[0] if v_res.get("license") else "(Standard open-weight license)"},
+                    ])
+                    st.dataframe(v_df, use_container_width=True)
+                else:
+                    st.warning(f"Could not verify model details: {v_res.get('error')}")
+
     if not model_status.available:
         with st.expander("Local Model (Ollama) Setup Instructions", expanded=False):
             st.markdown(
@@ -1986,6 +2004,41 @@ def _settings_tab(cfg, user: User) -> None:
                 f"- **Step 3:** Pull your configured model: `ollama pull {cfg.ai.model}`.\n"
                 "- **Step 4:** Return here and click **Re-test Connection**."
             )
+
+    st.subheader("Data Retention & Memory Controls")
+    st.caption("Manage customer data lifecycle, temporary buffers, and active memory sessions.")
+    cols = st.columns(2)
+    if isinstance(cols, (list, tuple)) and len(cols) >= 2:
+        col_ret1, col_ret2 = cols[0], cols[1]
+    else:
+        col_ret1, col_ret2 = st, st
+    with col_ret1:
+        if st.session_state.get("ingest") is not None:
+            if st.button("Purge Active Working Dataset from Memory", type="secondary"):
+                st.session_state.ingest = None
+                _invalidate_downstream_state()
+                st.success("Working dataset and cached analytical states have been permanently purged from memory.")
+                st.rerun()
+        else:
+            st.info("No active dataset currently loaded in memory.")
+    with col_ret2:
+        if st.button("Clear Temporary Files & Caches"):
+            import shutil
+            from private_analyst.paths import default_temp_dir
+            t_dir = default_temp_dir()
+            cleared_count = 0
+            if t_dir.exists():
+                for item in t_dir.iterdir():
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                            cleared_count += 1
+                        elif item.is_dir():
+                            shutil.rmtree(item, ignore_errors=True)
+                            cleared_count += 1
+                    except Exception:
+                        pass
+            st.success(f"Cleaned {cleared_count} temporary scratch file(s).")
 
     st.subheader("Privacy & Security Configuration")
     st.caption("Telemetry is hard-disabled at compile time. Model communications connect strictly to loopback (`127.0.0.1`).")
