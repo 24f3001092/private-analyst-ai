@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from private_analyst.ai.client import check_local_model, verify_local_model
-from private_analyst.ai.explainer import explain_results
+from private_analyst.ai.explainer import deterministic_explanation, explain_results
 from private_analyst.analytics.anomalies import detect_iqr_anomalies, detect_zscore_anomalies, linear_trend_forecast
 from private_analyst.analytics.cleaner import (
     CleaningRecommendation,
@@ -1175,19 +1175,53 @@ def _ask_tab(cfg, user: User) -> None:
                 prompt_bullets.append("- `Compute correlation matrix across numeric features.`")
         st.markdown("\n".join(prompt_bullets))
 
-    question = st.text_input("Question about the loaded table", value="Summarize the dataset.")
+    question = st.text_input("Question about the loaded table", value="Summarize the dataset.", key="ask_question_input")
 
-    if st.button("Run analysis"):
-        result = run_operation(ingest, question)
-        explanation = explain_results(result, question, cfg.ai)
-        st.session_state.last_result = result
-        st.session_state.last_explanation = explanation
-        _get_audit_log(cfg).record(
-            user.org_id,
-            user.username,
-            "run_analysis",
-            f"Operation: {result.intent}, Status: {result.status}",
-        )
+    if st.button("Run analysis", key="ask_run_analysis_btn", type="primary"):
+        clean_q = (question or "").strip()
+        if not clean_q:
+            st.warning("Please enter a question about the loaded table.")
+        else:
+            with st.spinner("Analyzing dataset with deterministic engine and generating briefing..."):
+                op_failed = False
+                result = None
+                try:
+                    result = run_operation(ingest, clean_q)
+                except Exception as exc:
+                    op_failed = True
+                    logger.error("Analysis operation execution error: %s", type(exc).__name__)
+                    st.error(f"Analysis operation error: {type(exc).__name__}")
+
+                if not op_failed and result is not None:
+                    try:
+                        explanation = explain_results(result, clean_q, cfg.ai)
+                    except Exception as exc:
+                        logger.warning("Local AI explanation error: %s", type(exc).__name__)
+                        explanation = {
+                            "source": "deterministic_fallback",
+                            "model_available": False,
+                            "model_detail": f"AI model error: {type(exc).__name__}",
+                            "text": deterministic_explanation(result, clean_q),
+                            "model_status": None,
+                        }
+
+                    st.session_state.last_result = result
+                    st.session_state.last_explanation = explanation
+
+                    audit_recorded = True
+                    try:
+                        _get_audit_log(cfg).record(
+                            user.org_id,
+                            user.username,
+                            "run_analysis",
+                            f"Operation: {result.intent}, Status: {result.status}",
+                        )
+                    except AuditLogError as exc:
+                        audit_recorded = False
+                        logger.warning("Failed to record run_analysis audit event: %s", type(exc).__name__)
+
+                    if not audit_recorded:
+                        st.warning("Analysis completed, but the audit event could not be recorded.")
 
     result = st.session_state.last_result
     explanation = st.session_state.last_explanation
@@ -1201,19 +1235,22 @@ def _ask_tab(cfg, user: User) -> None:
     if result.chart_spec:
         spec = result.chart_spec
         chart_type = spec.get("type")
-        if chart_type == "category_bar" and spec.get("column") in ingest.frame.columns:
-            st.plotly_chart(category_bar(ingest.frame, spec["column"]), key=f"ask_catbar_{spec['column']}", use_container_width=True)
-        elif chart_type == "histogram" and spec.get("column") in ingest.frame.columns:
-            st.plotly_chart(histogram(ingest.frame, spec["column"]), key=f"ask_hist_{spec['column']}", use_container_width=True)
-        elif chart_type == "crosstab_heatmap" and "crosstab" in result.calculated:
-            ct_df = pd.DataFrame(result.calculated["crosstab"])
-            st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), key=f"ask_crosstab_{spec.get('col_col')}_{spec.get('row_col')}", use_container_width=True)
-        elif chart_type == "correlation_heatmap" and "matrix" in result.calculated:
-            st.plotly_chart(correlation_heatmap(pd.DataFrame(result.calculated["matrix"])), key="ask_corr_heatmap", use_container_width=True)
-        elif chart_type == "time_series_line" and "trend_table" in result.calculated:
-            st.plotly_chart(time_series_line(pd.DataFrame(result.calculated["trend_table"]), "period", "total", f"Time Trend for '{spec.get('date_col')}'"), key=f"ask_trend_{spec.get('date_col')}", use_container_width=True)
-        elif chart_type == "bar" and spec.get("x") in ingest.frame.columns and spec.get("y") in ingest.frame.columns:
-            st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), key=f"ask_barsum_{spec['x']}_{spec['y']}", use_container_width=True)
+        try:
+            if chart_type == "category_bar" and spec.get("column") in ingest.frame.columns:
+                st.plotly_chart(category_bar(ingest.frame, spec["column"]), key=f"ask_catbar_{spec['column']}", use_container_width=True)
+            elif chart_type == "histogram" and spec.get("column") in ingest.frame.columns:
+                st.plotly_chart(histogram(ingest.frame, spec["column"]), key=f"ask_hist_{spec['column']}", use_container_width=True)
+            elif chart_type == "crosstab_heatmap" and "crosstab" in result.calculated:
+                ct_df = pd.DataFrame(result.calculated["crosstab"])
+                st.plotly_chart(crosstab_heatmap(ct_df, spec.get("col_col", ""), spec.get("row_col", "")), key=f"ask_crosstab_{spec.get('col_col')}_{spec.get('row_col')}", use_container_width=True)
+            elif chart_type == "correlation_heatmap" and "matrix" in result.calculated:
+                st.plotly_chart(correlation_heatmap(pd.DataFrame(result.calculated["matrix"])), key="ask_corr_heatmap", use_container_width=True)
+            elif chart_type == "time_series_line" and "trend_table" in result.calculated:
+                st.plotly_chart(time_series_line(pd.DataFrame(result.calculated["trend_table"]), "period", "total", f"Time Trend for '{spec.get('date_col')}'"), key=f"ask_trend_{spec.get('date_col')}", use_container_width=True)
+            elif chart_type == "bar" and spec.get("x") in ingest.frame.columns and spec.get("y") in ingest.frame.columns:
+                st.plotly_chart(bar_sum(ingest.frame, spec["x"], spec["y"]), key=f"ask_barsum_{spec['x']}_{spec['y']}", use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Visualization preview unavailable: {exc}")
 
     with st.container():
         st.markdown(f"**Intent:** `{result.intent.title()}` | **Engine Status:** `{result.status.upper()}`")
@@ -1227,10 +1264,11 @@ def _ask_tab(cfg, user: User) -> None:
     st.write("### AI Analysis & Narrative")
     if explanation.get("source") == "local_model":
         st.success(f"Narrative generated by local model ({explanation.get('model_detail')}). Verified totals remain engine-computed.")
-        st.markdown(explanation["text"])
+        st.markdown(explanation.get("text", ""))
     else:
         st.info("Local AI model is offline. Displaying deterministic structured engine findings below.")
-        st.markdown(explanation["text"])
+        st.markdown(explanation.get("text", ""))
+
 
 
 def _sql_tab(cfg, user: User) -> None:

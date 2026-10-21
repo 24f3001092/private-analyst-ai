@@ -237,22 +237,22 @@ def explain_results(
         + "\nLabel claims with [Observed Fact], [Calculated Metric], or [Model Interpretation]."
         + "\nNever invent unstated numbers, prize values, or dates."
     )
-    client = LocalModelClient(cfg)
-    status = client.status()
-    if not status.available:
-        detail_msg = (
-            f"Offline (Local runtime unreachable at http://{status.host}:{status.port})"
-            if "URLError" in status.detail or "OSError" in status.detail
-            else f"Offline ({status.detail})"
-        )
-        return {
-            "source": "deterministic_fallback",
-            "model_available": False,
-            "model_detail": detail_msg,
-            "text": fallback,
-            "model_status": status,
-        }
     try:
+        client = LocalModelClient(cfg)
+        status = client.status()
+        if not status.available:
+            detail_msg = (
+                f"Offline (Local runtime unreachable at http://{status.host}:{status.port})"
+                if "URLError" in status.detail or "OSError" in status.detail
+                else f"Offline ({status.detail})"
+            )
+            return {
+                "source": "deterministic_fallback",
+                "model_available": False,
+                "model_detail": detail_msg,
+                "text": fallback,
+                "model_status": status,
+            }
         text = client.generate(prompt)
         return {
             "source": "local_model",
@@ -268,5 +268,13 @@ def explain_results(
             "model_available": False,
             "model_detail": f"Local model runtime error: {exc}",
             "text": fallback,
-            "model_status": status,
+            "model_status": getattr(client, "status", lambda: None)() if "client" in locals() else None,
+        }
+    except Exception as exc:
+        return {
+            "source": "deterministic_fallback",
+            "model_available": False,
+            "model_detail": f"Local model error: {type(exc).__name__}",
+            "text": fallback,
+            "model_status": None,
         }
