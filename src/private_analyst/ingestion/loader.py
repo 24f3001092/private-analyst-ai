@@ -216,6 +216,8 @@ class IngestResult:
     raw_preview: list[dict[str, Any]] = field(default_factory=list)
     raw_frame: pd.DataFrame | None = None
     quality_report: Any = None
+    initial_frame: pd.DataFrame | None = None
+    header_ambiguous: bool = False
 
     @property
     def working_frame(self) -> pd.DataFrame:
@@ -236,8 +238,12 @@ class IngestResult:
             for op in (ops or [])
         ]
 
-    def add_cleaning_operation(self, op: CleaningOperation | dict[str, Any] | Any) -> None:
-        """Safely record a cleaning operation whether provided as a dataclass, dict, or raw record."""
+    def add_cleaning_operation(self, op: CleaningOperation | dict[str, Any] | list[Any] | Any) -> None:
+        """Safely record a cleaning operation whether provided as a dataclass, dict, list, or raw record."""
+        if isinstance(op, (list, tuple)):
+            for item in op:
+                self.add_cleaning_operation(item)
+            return
         if isinstance(op, CleaningOperation):
             self.cleaning_log.append(op)
         elif isinstance(op, dict):
@@ -341,6 +347,25 @@ def detect_header_row_from_raw(df_raw: pd.DataFrame) -> tuple[int, str | None]:
             best_row = r
 
     return best_row, title_text
+
+
+def check_header_ambiguity(df_raw: pd.DataFrame, header_row: int) -> tuple[bool, str | None]:
+    """Check if header row inference is ambiguous or uncertain."""
+    if df_raw.empty or header_row < 0 or header_row >= len(df_raw):
+        return False, None
+    row = df_raw.iloc[header_row].dropna()
+    if len(row) == 0:
+        return True, "Selected header row is completely blank."
+    total_cols = len(df_raw.columns)
+    if total_cols > 1 and len(row) / total_cols <= 0.35:
+        return True, "Selected header row contains mostly blank cells (likely an introductory title banner)."
+    num_numeric = sum(1 for v in row if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()))
+    if num_numeric / max(len(row), 1) >= 0.4:
+        return True, "Significant portion of headers are numeric values rather than descriptive column labels."
+    str_vals = [str(v).strip() for v in row]
+    if str_vals and all(s.isdigit() for s in str_vals if s):
+        return True, "Headers resemble positional row indices rather than field names."
+    return False, None
 
 
 def _infer_types(frame: pd.DataFrame) -> dict[str, str]:
@@ -841,6 +866,10 @@ def load_tabular(
     excluded_rows = max(0, raw_shape[0] - frame.shape[0])
     raw_prev = preview(df_raw, 10) if df_raw is not None else []
 
+    is_ambiguous, amb_reason = check_header_ambiguity(df_raw, h_idx)
+    if is_ambiguous and amb_reason:
+        warnings.append(f"Header row inference is ambiguous: {amb_reason} You can override headers in '3. Clean & Repair Data'.")
+
     return IngestResult(
         frame=frame,
         source_name=filename,
@@ -862,7 +891,9 @@ def load_tabular(
         unnamed_columns=unnamed_cols,
         semantic_types=sem_types,
         raw_preview=raw_prev,
-        raw_frame=df_raw,
+        raw_frame=df_raw.copy() if df_raw is not None else None,
+        initial_frame=frame.copy(),
+        header_ambiguous=is_ambiguous,
     )
 
 

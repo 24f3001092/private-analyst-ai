@@ -1,4 +1,10 @@
-from private_analyst.analytics.statistics import ColumnStats, DatasetStats, compute_dataset_stats
+from private_analyst.analytics.statistics import (
+    ColumnStats,
+    DatasetStats,
+    compute_dataset_stats,
+    explain_chart_exclusions,
+    recommend_charts,
+)
 from private_analyst.analytics.quality import DataQualityReport, assess_quality
 from private_analyst.analytics.anomalies import AnomalyResult, detect_iqr_anomalies
 from private_analyst.analytics.ml_engine import (
@@ -27,6 +33,8 @@ __all__ = [
     "ColumnStats",
     "DatasetStats",
     "compute_dataset_stats",
+    "explain_chart_exclusions",
+    "recommend_charts",
     "DataQualityReport",
     "assess_quality",
     "AnomalyResult",

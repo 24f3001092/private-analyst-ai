@@ -344,6 +344,49 @@ def compute_time_trends(
     }
 
 
+def _is_index_or_artifact(col_name: Any, series: pd.Series, c_stats: ColumnStats | None) -> tuple[bool, str]:
+    """Determine if a column is an artifact, sequential index, constant, or uninformative identifier."""
+    if c_stats is None:
+        return False, ""
+
+    if c_stats.kind == "empty" or c_stats.count == 0:
+        return True, "Column is completely empty or missing all values."
+
+    if c_stats.kind == "url":
+        return True, "URL link column is not suited for distribution charting."
+
+    if c_stats.unique <= 1:
+        return True, f"Column is constant with only {c_stats.unique} unique value."
+
+    col_str = str(col_name).strip()
+    col_lower = col_str.lower()
+
+    # Index candidates
+    if col_lower in {"#", "id", "s.no", "sl.no", "index", "row_id", "row", "no", "_id"}:
+        return True, f"Identified as row sequence or primary key identifier ('{col_name}')."
+
+    # Unnamed spreadsheet artifacts
+    if col_lower.startswith("unnamed:") or col_lower == "unnamed_column" or col_lower.startswith("unnamed_column__"):
+        return True, f"Unnamed spreadsheet layout artifact ('{col_name}')."
+
+    # Sequential row index numbers (e.g. 1, 2, 3...)
+    if pd.api.types.is_numeric_dtype(series):
+        non_null = series.dropna()
+        if len(non_null) >= 3 and non_null.is_monotonic_increasing:
+            diffs = non_null.diff().dropna()
+            if (diffs == 1).all() and non_null.iloc[0] in (0, 1):
+                return True, f"Sequential row index column with monotonic increments ('{col_name}')."
+
+    # High-cardinality text (near-unique identifier)
+    if c_stats.kind in ("categorical", "text"):
+        if c_stats.count > 5:
+            ratio = c_stats.unique / c_stats.count
+            if ratio > 0.85 and c_stats.unique > 15:
+                return True, f"High-cardinality free text / near-unique identifier ({c_stats.unique} distinct values across {c_stats.count} rows)."
+
+    return False, ""
+
+
 def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> list[dict[str, Any]]:
     """Recommend the most informative visualizations based on column types and distributions."""
     if stats is None:
@@ -352,9 +395,10 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
 
     # 1. Frequency distributions for top categorical features
     for col in (stats.categorical_column_names or []):
-        if col.lower() in {"#", "id", "s.no", "sl.no", "index"}:
-            continue
         c_stats = next((c for c in stats.columns if c.name == col), None)
+        is_art, _ = _is_index_or_artifact(col, frame[col], c_stats)
+        if is_art:
+            continue
         if c_stats and 2 <= c_stats.unique <= 30:
             recs.append({
                 "type": "category_bar",
@@ -362,6 +406,7 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
                 "title": f"Distribution of {col}",
                 "description": f"Displays counts across the {c_stats.unique} distinct values of '{col}'.",
                 "priority": 1,
+                "reason": f"Categorical feature with {c_stats.unique} distinct values.",
             })
             if len(recs) >= 2:
                 break
@@ -369,6 +414,9 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
     # 2. Histograms for numeric columns
     for col in (stats.numeric_column_names or []):
         c_stats = next((c for c in stats.columns if c.name == col), None)
+        is_art, _ = _is_index_or_artifact(col, frame[col], c_stats)
+        if is_art:
+            continue
         if c_stats and c_stats.unique > 3:
             recs.append({
                 "type": "histogram",
@@ -376,12 +424,16 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
                 "title": f"Distribution of {col}",
                 "description": f"Examines spread, skewness, and outliers in numeric feature '{col}'.",
                 "priority": 2,
+                "reason": f"Continuous numeric feature (range: {c_stats.min} to {c_stats.max}).",
             })
             if len(recs) >= 4:
                 break
 
-    # 3. Cross-tabulation / heatmap if >= 2 categorical
-    cat_candidates = [c for c in stats.categorical_column_names if c.lower() not in {"#", "id", "s.no", "sl.no", "index"}]
+    # 3. Cross-tabulation / heatmap if >= 2 valid categorical
+    cat_candidates = [
+        c for c in stats.categorical_column_names
+        if not _is_index_or_artifact(c, frame[c], next((s for s in stats.columns if s.name == c), None))[0]
+    ]
     if len(cat_candidates) >= 2:
         recs.append({
             "type": "crosstab_heatmap",
@@ -392,13 +444,17 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
             "priority": 3,
         })
 
-    # 4. Correlation heatmap if >= 2 numeric
-    if len(stats.numeric_column_names) >= 2:
+    # 4. Correlation heatmap if >= 2 valid numeric
+    num_candidates = [
+        c for c in stats.numeric_column_names
+        if not _is_index_or_artifact(c, frame[c], next((s for s in stats.columns if s.name == c), None))[0]
+    ]
+    if len(num_candidates) >= 2:
         recs.append({
             "type": "correlation_heatmap",
-            "columns": stats.numeric_column_names[:8],
+            "columns": num_candidates[:8],
             "title": "Numeric Feature Correlation Matrix",
-            "description": "Visualizes Pearson correlations across numeric features to identify collinear attributes.",
+            "description": f"Visualizes Pearson correlations across {min(len(num_candidates), 8)} numeric features.",
             "priority": 4,
         })
 
@@ -407,10 +463,60 @@ def recommend_charts(frame: pd.DataFrame, stats: DatasetStats | None = None) -> 
         recs.append({
             "type": "time_series",
             "date_col": stats.date_column_names[0],
-            "value_col": stats.numeric_column_names[0] if stats.numeric_column_names else None,
+            "value_col": num_candidates[0] if num_candidates else None,
             "title": f"Timeline Trend ({stats.date_column_names[0]})",
             "description": f"Tracks event cadence or metric trajectory over '{stats.date_column_names[0]}'.",
             "priority": 5,
         })
 
     return recs
+
+
+def explain_chart_exclusions(frame: pd.DataFrame, stats: DatasetStats | None = None) -> list[dict[str, Any]]:
+    """Explain why each column is either recommended or excluded from automated charts."""
+    if stats is None:
+        stats = compute_dataset_stats(frame)
+    explanations: list[dict[str, Any]] = []
+
+    recommended_cols = set()
+    for rec in recommend_charts(frame, stats):
+        if "column" in rec:
+            recommended_cols.add(rec["column"])
+        if "row_col" in rec:
+            recommended_cols.add(rec["row_col"])
+        if "col_col" in rec:
+            recommended_cols.add(rec["col_col"])
+        if "columns" in rec:
+            recommended_cols.update(rec["columns"])
+        if "date_col" in rec:
+            recommended_cols.add(rec["date_col"])
+
+    for col in frame.columns:
+        c_stats = next((s for s in stats.columns if s.name == col), None)
+        kind = c_stats.kind if c_stats else "unknown"
+        is_art, art_reason = _is_index_or_artifact(col, frame[col], c_stats)
+
+        if col in recommended_cols:
+            status = "Recommended"
+            detail = f"Included in automated visualizations ({kind})."
+        elif is_art:
+            status = "Excluded"
+            detail = art_reason
+        elif kind in ("categorical", "text") and c_stats and c_stats.unique > 30:
+            status = "Excluded"
+            detail = f"High cardinality ({c_stats.unique} distinct categories; exceeds 30-category chart readability threshold)."
+        elif kind == "numeric" and c_stats and c_stats.unique <= 3:
+            status = "Excluded"
+            detail = f"Low cardinality ({c_stats.unique} distinct values; better suited for filtering than continuous histogram)."
+        else:
+            status = "Available (Manual)"
+            detail = f"Valid {kind} column available in Custom Visualization Builder."
+
+        explanations.append({
+            "Column": str(col),
+            "Type": kind.title(),
+            "Recommendation Status": status,
+            "Explanation": detail,
+        })
+
+    return explanations

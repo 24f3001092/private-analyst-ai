@@ -35,6 +35,7 @@ from private_analyst.analytics.statistics import (
     compute_correlation_matrix,
     compute_dataset_stats,
     compute_time_trends,
+    explain_chart_exclusions,
     frequency_analysis,
     group_compare,
     recommend_charts,
@@ -47,6 +48,7 @@ from private_analyst.documents.ocr import ocr_image
 from private_analyst.documents.pdf import extract_pdf_text
 from private_analyst.exceptions import AuditLogError, AuthenticationError, PrivateAnalystError, ValidationError
 from private_analyst.ingestion.loader import (
+    CleaningOperation,
     IngestResult,
     WorkbookInfo,
     apply_transformations,
@@ -661,6 +663,12 @@ def _repair_tab(cfg, user: User) -> None:
         st.info("Import a table file first in '1. Import Data' to repair rows and columns.")
         return
 
+    if getattr(ingest, "header_ambiguous", False):
+        st.warning(
+            "⚠️ Header Ambiguity Detected: The current header row appears to contain generic or numeric identifiers. "
+            "If your dataset has introductory titles or banner rows, select the true header row below and click 'Apply Header Override'."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Header & Unnamed Column Repairs")
@@ -697,22 +705,25 @@ def _repair_tab(cfg, user: User) -> None:
             key="repair_override_header_input",
         )
         if st.button("Apply Header Override"):
-            source_df = ingest.raw_frame if ingest.raw_frame is not None else ingest.frame
-            repaired_frame, op = apply_header_override(source_df, override_idx)
-            ingest.frame = repaired_frame
-            ingest.working_frame = repaired_frame
-            ingest.header_row = override_idx
-            if op:
-                if hasattr(ingest, "add_cleaning_operation"):
-                    ingest.add_cleaning_operation(op)
-                elif hasattr(ingest, "cleaning_log"):
-                    ingest.cleaning_log.append(op)
-                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                    ingest.cleaning_operations.append(op)
-            st.session_state.ingest = ingest
-            _invalidate_downstream_state()
-            st.success(f"Promoted row {override_idx + 1} to column headers.")
-            st.rerun()
+            try:
+                source_df = ingest.raw_frame if ingest.raw_frame is not None else ingest.frame
+                repaired_frame, op = apply_header_override(source_df, override_idx)
+                ingest.frame = repaired_frame
+                ingest.working_frame = repaired_frame
+                ingest.header_row = override_idx
+                if op:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(op)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(op)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(op)
+                st.session_state.ingest = ingest
+                _invalidate_downstream_state()
+                st.success(f"Promoted row {override_idx + 1} to column headers.")
+                st.rerun()
+            except (ValidationError, ValueError) as exc:
+                st.error(str(exc))
 
     with col2:
         st.subheader("Column Management")
@@ -720,39 +731,45 @@ def _repair_tab(cfg, user: User) -> None:
         st.markdown("#### Exclude / Drop Columns")
         cols_to_drop = st.multiselect("Select Columns to Remove", all_cols, key="repair_drop_cols_select")
         if st.button("Drop Selected Columns") and cols_to_drop:
-            new_frame, op = apply_column_management(ingest.frame, drop_columns=cols_to_drop)
-            ingest.frame = new_frame
-            ingest.working_frame = new_frame
-            if op:
-                if hasattr(ingest, "add_cleaning_operation"):
-                    ingest.add_cleaning_operation(op)
-                elif hasattr(ingest, "cleaning_log"):
-                    ingest.cleaning_log.append(op)
-                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                    ingest.cleaning_operations.append(op)
-            st.session_state.ingest = ingest
-            _invalidate_downstream_state()
-            st.success(f"Dropped {len(cols_to_drop)} column(s).")
-            st.rerun()
+            try:
+                new_frame, ops = apply_column_management(ingest.frame, exclude_columns=cols_to_drop)
+                ingest.frame = new_frame
+                ingest.working_frame = new_frame
+                if ops:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(ops)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.extend(ops if isinstance(ops, list) else [ops])
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.extend(ops if isinstance(ops, list) else [ops])
+                st.session_state.ingest = ingest
+                _invalidate_downstream_state()
+                st.success(f"Dropped {len(cols_to_drop)} column(s).")
+                st.rerun()
+            except (ValidationError, ValueError) as exc:
+                st.error(str(exc))
 
         st.markdown("#### Rename Column")
         col_to_rename = st.selectbox("Select Column to Rename", all_cols, key="repair_rename_col_select")
         new_col_name = st.text_input("New Column Name", value=str(col_to_rename), key="repair_new_col_name_input")
         if st.button("Rename Column") and new_col_name and new_col_name != col_to_rename:
-            new_frame, op = apply_column_management(ingest.frame, rename_columns={col_to_rename: new_col_name})
-            ingest.frame = new_frame
-            ingest.working_frame = new_frame
-            if op:
-                if hasattr(ingest, "add_cleaning_operation"):
-                    ingest.add_cleaning_operation(op)
-                elif hasattr(ingest, "cleaning_log"):
-                    ingest.cleaning_log.append(op)
-                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                    ingest.cleaning_operations.append(op)
-            st.session_state.ingest = ingest
-            _invalidate_downstream_state()
-            st.success(f"Renamed '{col_to_rename}' to '{new_col_name}'.")
-            st.rerun()
+            try:
+                new_frame, ops = apply_column_management(ingest.frame, rename_columns={col_to_rename: new_col_name})
+                ingest.frame = new_frame
+                ingest.working_frame = new_frame
+                if ops:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(ops)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.extend(ops if isinstance(ops, list) else [ops])
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.extend(ops if isinstance(ops, list) else [ops])
+                st.session_state.ingest = ingest
+                _invalidate_downstream_state()
+                st.success(f"Renamed '{col_to_rename}' to '{new_col_name}'.")
+                st.rerun()
+            except (ValidationError, ValueError) as exc:
+                st.error(str(exc))
 
     st.divider()
     c_sub1, c_sub2 = st.columns(2)
@@ -777,20 +794,23 @@ def _repair_tab(cfg, user: User) -> None:
                 key="repair_imp_strat_select",
             )
             if st.button("Impute Missing Values"):
-                new_frame, op = handle_missing_values(ingest.frame, imp_col, imp_strategy)
-                ingest.frame = new_frame
-                ingest.working_frame = new_frame
-                if op:
-                    if hasattr(ingest, "add_cleaning_operation"):
-                        ingest.add_cleaning_operation(op)
-                    elif hasattr(ingest, "cleaning_log"):
-                        ingest.cleaning_log.append(op)
-                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                        ingest.cleaning_operations.append(op)
-                st.session_state.ingest = ingest
-                _invalidate_downstream_state()
-                st.success(f"Imputed missing values for '{imp_col}'.")
-                st.rerun()
+                try:
+                    new_frame, op = handle_missing_values(ingest.frame, imp_col, imp_strategy)
+                    ingest.frame = new_frame
+                    ingest.working_frame = new_frame
+                    if op:
+                        if hasattr(ingest, "add_cleaning_operation"):
+                            ingest.add_cleaning_operation(op)
+                        elif hasattr(ingest, "cleaning_log"):
+                            ingest.cleaning_log.append(op)
+                        elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                            ingest.cleaning_operations.append(op)
+                    st.session_state.ingest = ingest
+                    _invalidate_downstream_state()
+                    st.success(f"Imputed missing values for '{imp_col}'.")
+                    st.rerun()
+                except (ValidationError, ValueError) as exc:
+                    st.error(str(exc))
 
     with c_sub2:
         st.subheader("Row Filtering & Subsetting")
@@ -802,45 +822,69 @@ def _repair_tab(cfg, user: User) -> None:
         )
         filter_val = st.text_input("Comparison Value", value="", key="repair_filter_val_input")
         if st.button("Apply Row Filter"):
-            new_frame, op = filter_rows(ingest.frame, filter_col, filter_op, filter_val)
-            ingest.frame = new_frame
-            ingest.working_frame = new_frame
-            if op:
-                if hasattr(ingest, "add_cleaning_operation"):
-                    ingest.add_cleaning_operation(op)
-                elif hasattr(ingest, "cleaning_log"):
-                    ingest.cleaning_log.append(op)
-                elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                    ingest.cleaning_operations.append(op)
-            st.session_state.ingest = ingest
-            _invalidate_downstream_state()
-            st.success(f"Filter applied: {len(new_frame):,} rows remaining.")
-            st.rerun()
+            try:
+                new_frame, op = filter_rows(ingest.frame, filter_col, filter_op, filter_val)
+                ingest.frame = new_frame
+                ingest.working_frame = new_frame
+                if op:
+                    if hasattr(ingest, "add_cleaning_operation"):
+                        ingest.add_cleaning_operation(op)
+                    elif hasattr(ingest, "cleaning_log"):
+                        ingest.cleaning_log.append(op)
+                    elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
+                        ingest.cleaning_operations.append(op)
+                st.session_state.ingest = ingest
+                _invalidate_downstream_state()
+                st.success(f"Filter applied: {len(new_frame):,} rows remaining.")
+                st.rerun()
+            except (ValidationError, ValueError) as exc:
+                st.error(str(exc))
 
-    if ingest.raw_frame is not None:
+    if ingest.raw_frame is not None or getattr(ingest, "initial_frame", None) is not None:
         st.divider()
         st.subheader("Revert Dataset to Original File State")
-        st.caption("Discard all interactive modifications and restore the original uncleaned spreadsheet buffer.")
-        if st.button("Reset Dataset to Raw Extract", type="secondary"):
-            ingest.frame = ingest.raw_frame.copy()
-            ingest.working_frame = ingest.raw_frame.copy()
-            ingest.unnamed_columns = [c for c in ingest.frame.columns if "unnamed" in str(c).lower()]
-            reset_op = CleaningOperation(
-                step="reset_dataset",
-                description="Reset dataset to raw file extract",
-                impact=f"Restored {len(ingest.frame)} rows and {len(ingest.frame.columns)} columns",
-                rows_affected=len(ingest.frame),
-            )
-            if hasattr(ingest, "add_cleaning_operation"):
-                ingest.add_cleaning_operation(reset_op)
-            elif hasattr(ingest, "cleaning_log"):
-                ingest.cleaning_log.append(reset_op)
-            elif hasattr(ingest, "cleaning_operations") and isinstance(ingest.cleaning_operations, list):
-                ingest.cleaning_operations.append(reset_op)
-            st.session_state.ingest = ingest
-            _invalidate_downstream_state()
-            st.success("Dataset successfully reset to original file state.")
-            st.rerun()
+        st.caption(
+            "Discard interactive modifications. You can restore either the initial loaded table "
+            "(with detected headers) or the raw un-promoted spreadsheet matrix."
+        )
+        col_rst1, col_rst2 = st.columns(2)
+        with col_rst1:
+            if getattr(ingest, "initial_frame", None) is not None:
+                if st.button("Reset to Initial Loaded Table", type="secondary"):
+                    restored = ingest.initial_frame.copy()
+                    ingest.frame = restored
+                    ingest.working_frame = restored
+                    ingest.unnamed_columns = [c for c in restored.columns if "unnamed" in str(c).lower()]
+                    reset_op = CleaningOperation(
+                        step="reset_dataset",
+                        description="Reset dataset to initial loaded state",
+                        impact=f"Restored initial loaded table with {len(restored)} rows and {len(restored.columns)} columns",
+                        rows_affected=len(restored),
+                    )
+                    ingest.cleaning_log = [reset_op]
+                    st.session_state.ingest = ingest
+                    _invalidate_downstream_state()
+                    st.success("Dataset reset to initial loaded table.")
+                    st.rerun()
+
+        with col_rst2:
+            if ingest.raw_frame is not None:
+                if st.button("Reset Dataset to Raw Extract", type="secondary"):
+                    restored = ingest.raw_frame.copy()
+                    ingest.frame = restored
+                    ingest.working_frame = restored
+                    ingest.unnamed_columns = [c for c in restored.columns if "unnamed" in str(c).lower()]
+                    reset_op = CleaningOperation(
+                        step="reset_dataset",
+                        description="Reset dataset to raw spreadsheet extract",
+                        impact=f"Restored raw extract buffer with {len(restored)} rows and {len(restored.columns)} columns",
+                        rows_affected=len(restored),
+                    )
+                    ingest.cleaning_log = [reset_op]
+                    st.session_state.ingest = ingest
+                    _invalidate_downstream_state()
+                    st.success("Dataset successfully reset to original file state.")
+                    st.rerun()
 
 
 def _explore_tab(cfg, user: User) -> None:
@@ -881,11 +925,14 @@ def _explore_tab(cfg, user: User) -> None:
     if numeric_rows:
         st.subheader("Numeric Distributions")
         st.dataframe(pd.DataFrame(numeric_rows), use_container_width=True)
-        first_num = stats.numeric_column_names[0]
-        st.plotly_chart(histogram(ingest.frame, first_num), key=f"explore_hist_{first_num}", use_container_width=True)
-        cats = [c for c in ingest.frame.columns if c not in stats.numeric_column_names]
-        if cats:
-            st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first_num), key=f"explore_barsum_{cats[0]}_{first_num}", use_container_width=True)
+        try:
+            first_num = stats.numeric_column_names[0]
+            st.plotly_chart(histogram(ingest.frame, first_num), key=f"explore_hist_{first_num}", use_container_width=True)
+            cats = [c for c in ingest.frame.columns if c not in stats.numeric_column_names]
+            if cats:
+                st.plotly_chart(bar_sum(ingest.frame, str(cats[0]), first_num), key=f"explore_barsum_{cats[0]}_{first_num}", use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Distribution chart unavailable: {exc}")
 
     cat_cols_stats = [col for col in stats.columns if col.kind != "numeric" and col.name not in {"#", "id", "s.no", "sl.no", "index"}]
     if cat_cols_stats:
@@ -904,19 +951,32 @@ def _explore_tab(cfg, user: User) -> None:
             for col in cat_cols_stats
         ]
         st.dataframe(pd.DataFrame(cat_summary_rows), use_container_width=True)
-        top_cat_name = cat_cols_stats[0].name
-        st.plotly_chart(category_bar(ingest.frame, top_cat_name), key=f"explore_topcat_{top_cat_name}", use_container_width=True)
+        try:
+            top_cat_name = cat_cols_stats[0].name
+            st.plotly_chart(category_bar(ingest.frame, top_cat_name), key=f"explore_topcat_{top_cat_name}", use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Category chart unavailable: {exc}")
 
     if len(stats.numeric_column_names) >= 2:
         st.subheader("Correlation Matrix & Pairwise Association")
         st.caption("Pearson correlation coefficients across numeric features.")
         c_res = compute_correlation_matrix(ingest.frame)
         if c_res.get("status") == "ok":
-            corr_df = pd.DataFrame(c_res["matrix"])
-            st.plotly_chart(correlation_heatmap(corr_df), key="explore_corr_heatmap", use_container_width=True)
-            if c_res.get("top_correlations"):
-                with st.expander("Ranked Correlation Pairs", expanded=False):
-                    st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+            try:
+                corr_df = pd.DataFrame(c_res["matrix"])
+                st.plotly_chart(correlation_heatmap(corr_df), key="explore_corr_heatmap", use_container_width=True)
+                if c_res.get("top_correlations"):
+                    with st.expander("Ranked Correlation Pairs", expanded=False):
+                        st.dataframe(pd.DataFrame(c_res["top_correlations"]), use_container_width=True)
+            except Exception as exc:
+                st.warning(f"Correlation chart unavailable: {exc}")
+
+    with st.expander("Column Suitability & Recommendation Insights", expanded=False):
+        explanations = explain_chart_exclusions(ingest.frame, stats)
+        if explanations:
+            st.dataframe(pd.DataFrame(explanations), use_container_width=True)
+        else:
+            st.info("No columns available to evaluate.")
 
 
 def _viz_tab(cfg, user: User) -> None:
@@ -1016,14 +1076,37 @@ def _viz_tab(cfg, user: User) -> None:
                 st.caption(rec['description'])
                 rtype = rec.get("type")
                 rcol = rec.get("column")
-                if rtype == "category_bar" and rcol in ingest.frame.columns:
-                    st.plotly_chart(category_bar(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
-                elif rtype == "histogram" and rcol in ingest.frame.columns:
-                    st.plotly_chart(histogram(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
-                elif rtype == "correlation_heatmap":
-                    c_res = compute_correlation_matrix(ingest.frame)
-                    if c_res.get("status") == "ok":
-                        st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), key=f"viz_rec_{idx}_{rtype}_matrix", use_container_width=True)
+                try:
+                    if rtype == "category_bar" and rcol in ingest.frame.columns:
+                        st.plotly_chart(category_bar(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
+                    elif rtype == "histogram" and rcol in ingest.frame.columns:
+                        st.plotly_chart(histogram(ingest.frame, rcol), key=f"viz_rec_{idx}_{rtype}_{rcol}", use_container_width=True)
+                    elif rtype == "correlation_heatmap":
+                        c_res = compute_correlation_matrix(ingest.frame)
+                        if c_res.get("status") == "ok":
+                            st.plotly_chart(correlation_heatmap(pd.DataFrame(c_res["matrix"])), key=f"viz_rec_{idx}_{rtype}_matrix", use_container_width=True)
+                    elif rtype == "crosstab_heatmap":
+                        col1_name = rec.get("col1")
+                        col2_name = rec.get("col2")
+                        if col1_name in ingest.frame.columns and col2_name in ingest.frame.columns:
+                            st.plotly_chart(crosstab_heatmap(ingest.frame, col1_name, col2_name), key=f"viz_rec_{idx}_{rtype}_{col1_name}_{col2_name}", use_container_width=True)
+                    elif rtype == "time_series_line":
+                        d_col = rec.get("date_col")
+                        m_col = rec.get("metric_col")
+                        if d_col in ingest.frame.columns:
+                            t_res = compute_time_trends(ingest.frame, d_col, m_col)
+                            if t_res.get("status") == "ok":
+                                trend_df = pd.DataFrame(t_res["trend_table"])
+                                st.plotly_chart(time_series_line(trend_df, "period", "total", rec.get("title")), key=f"viz_rec_{idx}_{rtype}_{d_col}", use_container_width=True)
+                except Exception as exc:
+                    st.warning(f"Could not render {rec.get('title')}: {exc}")
+
+    with st.expander("Chart Recommendation Insights & Column Suitability", expanded=False):
+        explanations = explain_chart_exclusions(ingest.frame, stats)
+        if explanations:
+            st.dataframe(pd.DataFrame(explanations), use_container_width=True)
+        else:
+            st.info("No columns available to evaluate.")
 
 
 def _dashboard_tab() -> None:

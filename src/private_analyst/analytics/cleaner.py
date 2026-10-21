@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from private_analyst.analytics.quality import DataQualityReport, assess_quality
+from private_analyst.exceptions import ValidationError
 from private_analyst.ingestion.loader import (
     CleaningOperation,
     parse_currency,
@@ -543,7 +544,17 @@ def apply_header_override(
     if header_row < 0 or header_row >= len(raw_frame):
         raise ValueError(f"Header row index {header_row} is out of bounds (0 to {len(raw_frame)-1}).")
 
-    raw_headers = [str(x).strip() or f"column_{i+1}" for i, x in enumerate(raw_frame.iloc[header_row])]
+    raw_headers: list[str] = []
+    for i, x in enumerate(raw_frame.iloc[header_row]):
+        if x is None or pd.isna(x):
+            raw_headers.append(f"unnamed_column__{i+1}")
+        else:
+            val_str = str(x).strip()
+            if not val_str or val_str.lower() in ("none", "nan", "null"):
+                raw_headers.append(f"unnamed_column__{i+1}")
+            else:
+                raw_headers.append(val_str)
+
     # Deduplicate headers if identical
     seen: dict[str, int] = {}
     clean_headers: list[str] = []
@@ -577,14 +588,32 @@ def apply_column_management(
     include_columns: list[str] | None = None,
     exclude_columns: list[str] | None = None,
     rename_columns: dict[str, str] | None = None,
+    drop_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[CleaningOperation]]:
     """Manage table schema: select columns to keep/exclude, or rename columns."""
+    if frame.empty and not list(frame.columns):
+        raise ValidationError("Table has no columns to manage.")
+
     updated = frame.copy()
     ops: list[CleaningOperation] = []
 
+    # Merge drop_columns alias into exclude_columns
+    effective_excludes: list[str] = []
+    if exclude_columns:
+        effective_excludes.extend([str(c) for c in exclude_columns if c is not None])
+    if drop_columns:
+        for c in drop_columns:
+            if c is not None and str(c) not in effective_excludes:
+                effective_excludes.append(str(c))
+
     if include_columns is not None:
+        if not include_columns:
+            raise ValidationError("Include column list cannot be empty. At least one column must be specified.")
+        missing_includes = [c for c in include_columns if c not in updated.columns]
+        if missing_includes:
+            raise ValidationError(f"Include columns {missing_includes} not found in dataset.")
         valid_includes = [c for c in include_columns if c in updated.columns]
-        if valid_includes and len(valid_includes) < len(updated.columns):
+        if len(valid_includes) < len(updated.columns):
             dropped_cols = [c for c in updated.columns if c not in valid_includes]
             updated = updated[valid_includes].copy()
             ops.append(
@@ -597,23 +626,53 @@ def apply_column_management(
                 )
             )
 
-    if exclude_columns:
-        valid_excludes = [c for c in exclude_columns if c in updated.columns]
-        if valid_excludes:
-            updated = updated.drop(columns=valid_excludes)
-            ops.append(
-                CleaningOperation(
-                    step="exclude_columns",
-                    description=f"Excluded {len(valid_excludes)} column(s): {', '.join(valid_excludes)}",
-                    impact="Removed selected columns from active working dataset",
-                    affected_columns=valid_excludes,
-                    status="applied",
-                )
+    if effective_excludes:
+        missing_excludes = [c for c in effective_excludes if c not in updated.columns]
+        if missing_excludes and len(missing_excludes) == len(effective_excludes):
+            raise ValidationError(f"None of the specified columns to exclude {effective_excludes} exist in the table.")
+        elif missing_excludes:
+            raise ValidationError(f"Columns {missing_excludes} not found in dataset.")
+        valid_excludes = [c for c in effective_excludes if c in updated.columns]
+        if len(valid_excludes) >= len(updated.columns):
+            raise ValidationError("Cannot drop all columns from the dataset. At least one column must be retained.")
+
+        updated = updated.drop(columns=valid_excludes)
+        ops.append(
+            CleaningOperation(
+                step="exclude_columns",
+                description=f"Excluded {len(valid_excludes)} column(s): {', '.join(valid_excludes)}",
+                impact="Removed selected columns from active working dataset",
+                affected_columns=valid_excludes,
+                status="applied",
             )
+        )
 
     if rename_columns:
-        valid_renames = {k: v.strip() for k, v in rename_columns.items() if k in updated.columns and v.strip() and v.strip() != k}
+        if not isinstance(rename_columns, dict):
+            raise ValidationError("rename_columns must be a dictionary of {old_name: new_name}.")
+        valid_renames: dict[str, str] = {}
+        for k, v in rename_columns.items():
+            k_str = str(k)
+            v_str = str(v).strip() if v is not None else ""
+            if not v_str:
+                raise ValidationError(f"New column name for '{k_str}' cannot be empty or whitespace.")
+            if k_str not in updated.columns:
+                raise ValidationError(f"Column '{k_str}' to rename was not found in table columns.")
+            if v_str != k_str:
+                valid_renames[k_str] = v_str
+
         if valid_renames:
+            # Check for duplicate target names in the rename mapping
+            target_names = list(valid_renames.values())
+            if len(target_names) != len(set(target_names)):
+                raise ValidationError(f"Duplicate target column names detected in rename mapping: {target_names}")
+
+            # Check if any target name conflicts with retained existing columns
+            retained_existing = set(c for c in updated.columns if c not in valid_renames)
+            conflicts = [t for t in target_names if t in retained_existing]
+            if conflicts:
+                raise ValidationError(f"Cannot rename column: target name '{conflicts[0]}' already exists in the table.")
+
             updated = updated.rename(columns=valid_renames)
             ops.append(
                 CleaningOperation(
