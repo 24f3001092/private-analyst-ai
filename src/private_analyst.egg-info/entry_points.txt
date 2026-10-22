@@ -1,0 +1,2 @@
+[console_scripts]
+private-analyst = private_analyst.ui.streamlit_app:main

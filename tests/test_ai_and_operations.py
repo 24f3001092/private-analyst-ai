@@ -121,3 +121,55 @@ def test_cluster_intent_routing(sales_csv_bytes, limits: Limits) -> None:
     assert result.status == "hypothesis"
     assert "cluster_centers" in result.calculated
 
+
+def test_frequency_intent_routing(sales_csv_bytes, limits: Limits) -> None:
+    ingest = load_tabular(sales_csv_bytes, "sales_known.csv", limits)
+    assert classify_intent("Show frequency breakdown of status") == "frequency"
+    result = run_operation(ingest, "Show frequency breakdown of status")
+    assert result.intent == "frequency"
+    assert result.status == "ok"
+    assert "frequency_table" in result.calculated
+    assert result.chart_spec is not None
+    assert result.chart_spec["type"] == "category_bar"
+
+
+def test_crosstab_intent_routing(sales_csv_bytes, limits: Limits) -> None:
+    ingest = load_tabular(sales_csv_bytes, "sales_known.csv", limits)
+    assert classify_intent("Show crosstab of region vs product") == "crosstab"
+    result = run_operation(ingest, "Show crosstab of region vs product")
+    assert result.intent == "crosstab"
+    assert result.status == "ok"
+    assert "crosstab" in result.calculated
+    assert result.chart_spec is not None
+    assert result.chart_spec["type"] == "crosstab_heatmap"
+
+
+def test_deterministic_explanation_structure(sales_csv_bytes, limits: Limits) -> None:
+    from private_analyst.ai.explainer import deterministic_explanation
+
+    ingest = load_tabular(sales_csv_bytes, "sales_known.csv", limits)
+    result = run_operation(ingest, "Summarize the dataset.")
+    text = deterministic_explanation(result, "Summarize the dataset.")
+    assert "### Analysis Summary: Summarize" in text
+    assert "Observed Facts" in text
+    assert "Calculated Metrics & Findings" in text
+    assert "50" in text
+    assert '{"row_count":' not in text
+
+
+def test_local_model_status_diagnostics() -> None:
+    from private_analyst.ai.client import ModelStatus
+
+    # Simulated offline status
+    status = ModelStatus(False, "ollama", "127.0.0.1", "llama3.2", "URLError", 11434)
+    assert not status.is_ready
+    assert "Offline" in status.friendly_status
+    assert len(status.troubleshooting_steps) > 0
+    assert any("ollama serve" in step for step in status.troubleshooting_steps)
+
+    # Simulated online ready status
+    online = ModelStatus(True, "ollama", "127.0.0.1", "llama3.2", "runtime_reachable", 11434)
+    assert online.is_ready
+    assert "Online & Ready" in online.friendly_status
+    assert len(online.troubleshooting_steps) == 0
+

@@ -16,6 +16,7 @@ analyst.internal.domain {
         X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
         Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'self';"
     }
 
     # Request size limit (50 MB)

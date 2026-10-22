@@ -46,6 +46,55 @@ def detect_iqr_anomalies(frame: pd.DataFrame, column: str, multiplier: float = 1
     )
 
 
+def detect_zscore_anomalies(frame: pd.DataFrame, column: str, threshold: float = 3.0) -> AnomalyResult:
+    """Detect anomalies using the parametric Z-score method (|Z| > threshold)."""
+    if column not in frame.columns:
+        raise KeyError("Column is not in the loaded table.")
+    series = frame[column]
+    if not _is_numeric(series):
+        raise ValueError("Z-score anomaly detection requires a numeric column.")
+    finite = _finite_numeric(series)
+    if len(finite) < 3:
+        return AnomalyResult(
+            column=column,
+            method="zscore",
+            lower=0.0,
+            upper=0.0,
+            outlier_count=0,
+            outlier_row_indexes=[],
+            caveat="Z-score anomaly detection requires at least 3 finite numeric values.",
+        )
+    mean = float(finite.mean())
+    std = float(finite.std(ddof=1))
+    if std == 0.0:
+        return AnomalyResult(
+            column=column,
+            method="zscore",
+            lower=mean,
+            upper=mean,
+            outlier_count=0,
+            outlier_row_indexes=[],
+            caveat="Standard deviation is 0; no variation exists to compute Z-scores.",
+        )
+    lower = mean - threshold * std
+    upper = mean + threshold * std
+    z_scores = (finite - mean).abs() / std
+    mask = z_scores > threshold
+    indexes = [int(i) for i in finite.index[mask].tolist()]
+    return AnomalyResult(
+        column=column,
+        method="zscore",
+        lower=round(lower, 3),
+        upper=round(upper, 3),
+        outlier_count=len(indexes),
+        outlier_row_indexes=indexes[:200],
+        caveat=(
+            f"Z-score method assumes an approximately normal distribution. "
+            f"Values beyond {threshold} standard deviations (|Z| > {threshold}) are flagged as statistical outliers."
+        ),
+    )
+
+
 def linear_trend_forecast(values: list[float], periods: int = 3) -> dict:
     """Unvalidated linear extrapolation. Labelled as a hypothesis, not a fact."""
     import numpy as np
