@@ -182,3 +182,61 @@ def test_csv_formula_injection_categorical_and_duplicate_columns() -> None:
     dup_csv = to_csv_bytes(dup_clean).decode("utf-8")
     assert "'=danger1" in dup_csv
     assert "'=danger2" in dup_csv
+
+
+def test_markdown_and_pdf_report_with_correlation_result() -> None:
+    """Regression test: report_markdown and to_pdf_bytes must handle correlation calculated schema where columns is list[str]."""
+    result = OperationResult(
+        intent="correlation",
+        status="ok",
+        observed={"numeric_columns": ["sales", "profit"], "row_count": 100},
+        calculated={
+            "status": "ok",
+            "columns": ["sales", "profit"],
+            "matrix": {
+                "sales": {"sales": 1.0, "profit": 0.842},
+                "profit": {"sales": 0.842, "profit": 1.0},
+            },
+            "top_correlations": [
+                {
+                    "col1": "sales",
+                    "col2": "profit",
+                    "correlation": 0.842,
+                    "relationship": "Strong positive",
+                }
+            ],
+        },
+        hypotheses=["Correlation indicates statistical association, not causation."],
+        chart_spec={"type": "correlation_heatmap"},
+        recommendations=["Investigate strongly correlated pairs (|r| >= 0.7)."],
+    )
+
+    md = report_markdown(result, "Strong positive correlation observed.", include_explanation=True)
+    assert "| `sales` | `profit` | `+0.842` | Strong positive |" in md
+    assert "Correlation indicates statistical association" in md
+
+    pdf_bytes = to_pdf_bytes(result, "Strong positive correlation observed.", include_explanation=True)
+    assert isinstance(pdf_bytes, bytes)
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_markdown_report_with_arbitrary_string_columns_and_empty_columns() -> None:
+    """Regression test: report_markdown must handle empty columns and list[str] columns without crashing."""
+    empty_result = OperationResult(
+        intent="custom",
+        status="ok",
+        observed={},
+        calculated={"columns": [], "metric_val": 42},
+    )
+    md_empty = report_markdown(empty_result, "Empty columns test", include_explanation=True)
+    assert "- **Metric Val:** 42" in md_empty
+
+    str_cols_result = OperationResult(
+        intent="custom",
+        status="ok",
+        observed={},
+        calculated={"columns": ["alpha", "beta"], "score": 99.5},
+    )
+    md_str = report_markdown(str_cols_result, "Str columns test", include_explanation=True)
+    assert "alpha, beta" in md_str
+    assert "- **Score:** 99.5" in md_str

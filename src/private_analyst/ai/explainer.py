@@ -49,7 +49,12 @@ def deterministic_explanation(result: OperationResult, question: str) -> str:
         lines.append("#### Calculated Metrics & Findings")
 
         # Check if dataset summary stats
-        if "columns" in calc and isinstance(calc["columns"], list):
+        if (
+            "columns" in calc
+            and isinstance(calc["columns"], list)
+            and calc["columns"]
+            and isinstance(calc["columns"][0], dict)
+        ):
             row_count = calc.get("row_count", len(calc.get("columns", [])))
             col_count = calc.get("column_count", len(calc.get("columns", [])))
             num_cols = calc.get("numeric_column_names", [])
@@ -63,25 +68,27 @@ def deterministic_explanation(result: OperationResult, question: str) -> str:
 
             lines.append("**Column Details:**")
             for col in calc["columns"]:
-                cname = col.get("name", "unknown")
-                ckind = col.get("kind", "unknown")
-                cmiss = col.get("missing", 0)
-                cuniq = col.get("unique", 0)
+                if isinstance(col, dict):
+                    cname = col.get("name", "unknown")
+                    ckind = col.get("kind", "unknown")
+                    cmiss = col.get("missing", 0)
+                    cuniq = col.get("unique", 0)
 
-                if ckind == "numeric":
-                    csum = col.get("sum")
-                    cmean = col.get("mean")
-                    cmedian = col.get("median")
-                    cmin = col.get("min")
-                    cmax = col.get("max")
-                    stats_str = f"sum={csum}, mean={cmean}, median={cmedian}, min={cmin}, max={cmax}"
-                    lines.append(f"- **`{cname}`** (numeric, missing={cmiss}): {stats_str}")
-                else:
-                    top_val = col.get("top_value")
-                    top_freq = col.get("top_freq")
-                    top_str = f" | top: '{top_val}' ({top_freq}x)" if top_val is not None else ""
-                    lines.append(f"- **`{cname}`** ({ckind}, missing={cmiss}, unique={cuniq}{top_str})")
+                    if ckind == "numeric":
+                        csum = col.get("sum")
+                        cmean = col.get("mean")
+                        cmedian = col.get("median")
+                        cmin = col.get("min")
+                        cmax = col.get("max")
+                        stats_str = f"sum={csum}, mean={cmean}, median={cmedian}, min={cmin}, max={cmax}"
+                        lines.append(f"- **`{cname}`** (numeric, missing={cmiss}): {stats_str}")
+                    else:
+                        top_val = col.get("top_value")
+                        top_freq = col.get("top_freq")
+                        top_str = f" | top: '{top_val}' ({top_freq}x)" if top_val is not None else ""
+                        lines.append(f"- **`{cname}`** ({ckind}, missing={cmiss}, unique={cuniq}{top_str})")
             lines.append("")
+
 
         elif "quality_score" in calc:
             q_score = calc.get("quality_score", 0.0)

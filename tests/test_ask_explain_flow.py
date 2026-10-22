@@ -297,3 +297,37 @@ def test_ask_tab_unloaded_dataset(ask_test_env) -> None:
         _ask_tab(cfg, user)
 
         mock_st.info.assert_called_with("Import a table before asking questions.")
+
+
+def test_deterministic_explanation_with_correlation_result() -> None:
+    """Regression test: deterministic_explanation must handle correlation calculated schema without AttributeError."""
+    from private_analyst.ai.explainer import deterministic_explanation
+
+    result = OperationResult(
+        intent="correlation",
+        status="ok",
+        observed={"numeric_columns": ["revenue", "units"], "row_count": 50},
+        calculated={
+            "status": "ok",
+            "columns": ["revenue", "units"],
+            "matrix": {
+                "revenue": {"revenue": 1.0, "units": 0.912},
+                "units": {"revenue": 0.912, "units": 1.0},
+            },
+            "top_correlations": [
+                {
+                    "col1": "revenue",
+                    "col2": "units",
+                    "correlation": 0.912,
+                    "relationship": "Strong positive",
+                }
+            ],
+        },
+        hypotheses=["Methodological note: Correlation != Causation"],
+        chart_spec={"type": "correlation_heatmap"},
+        recommendations=["Review relationship between revenue and units."],
+    )
+
+    explanation = deterministic_explanation(result, "What is the correlation between revenue and units?")
+    assert "**revenue** & **units**: `r = +0.912` (Strong positive)" in explanation
+    assert "Correlation != Causation" in explanation

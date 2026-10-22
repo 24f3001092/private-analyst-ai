@@ -214,25 +214,36 @@ def report_markdown(
             lines.append(f"- **Overall Quality Score:** {calc.get('quality_score')} / 100 ({calc.get('grade')})")
             lines.append(f"- **Total Missing Cells:** {calc.get('total_missing_cells', 0):,}")
             lines.append(f"- **Duplicate Rows:** {calc.get('duplicate_rows', 0)}")
-        elif "columns" in calc and isinstance(calc["columns"], list):
+        elif "top_correlations" in calc:
+            lines.append("| Feature 1 | Feature 2 | Pearson Correlation | Relationship |")
+            lines.append("| :--- | :--- | :--- | :--- |")
+            for p in calc.get("top_correlations", []):
+                lines.append(f"| `{p.get('col1')}` | `{p.get('col2')}` | `{p.get('correlation'):+.3f}` | {p.get('relationship')} |")
+        elif (
+            "columns" in calc
+            and isinstance(calc["columns"], list)
+            and calc["columns"]
+            and isinstance(calc["columns"][0], dict)
+        ):
             lines.append(f"- **Total Rows:** {calc.get('row_count')}")
             lines.append(f"- **Total Columns:** {calc.get('column_count')}")
             lines.append("")
             lines.append("| Column | Type | Missing | Unique | Summary Stats |")
             lines.append("| :--- | :--- | :--- | :--- | :--- |")
             for c in calc["columns"]:
-                name = c.get("name")
-                kind = c.get("kind")
-                miss = c.get("missing", 0)
-                uniq = c.get("unique", 0)
-                if kind == "numeric":
-                    summary = f"mean={c.get('mean')}, median={c.get('median')}, sum={c.get('sum')}"
-                elif kind == "currency" and c.get("parsed_sum") is not None:
-                    summary = f"total={c.get('currency_symbol') or ''}{c.get('parsed_sum'):,}"
-                else:
-                    top = c.get("top_value")
-                    summary = f"top='{top}' ({c.get('top_freq')}x)" if top else "N/A"
-                lines.append(f"| `{name}` | {kind} | {miss} | {uniq} | {summary} |")
+                if isinstance(c, dict):
+                    name = c.get("name")
+                    kind = c.get("kind")
+                    miss = c.get("missing", 0)
+                    uniq = c.get("unique", 0)
+                    if kind == "numeric":
+                        summary = f"mean={c.get('mean')}, median={c.get('median')}, sum={c.get('sum')}"
+                    elif kind == "currency" and c.get("parsed_sum") is not None:
+                        summary = f"total={c.get('currency_symbol') or ''}{c.get('parsed_sum'):,}"
+                    else:
+                        top = c.get("top_value")
+                        summary = f"top='{top}' ({c.get('top_freq')}x)" if top else "N/A"
+                    lines.append(f"| `{name}` | {kind} | {miss} | {uniq} | {summary} |")
         elif "frequency_table" in calc:
             lines.append("| Category | Count | Percentage (%) | Cumulative (%) |")
             lines.append("| :--- | :--- | :--- | :--- |")
@@ -242,11 +253,6 @@ def report_markdown(
                 pct = r.get("Percentage (%)", r.get("percentage"))
                 cum = r.get("Cumulative (%)", r.get("cumulative"))
                 lines.append(f"| {cat} | {cnt} | {pct}% | {cum}% |")
-        elif "top_correlations" in calc:
-            lines.append("| Feature 1 | Feature 2 | Pearson Correlation | Relationship |")
-            lines.append("| :--- | :--- | :--- | :--- |")
-            for p in calc.get("top_correlations", []):
-                lines.append(f"| `{p.get('col1')}` | `{p.get('col2')}` | `{p.get('correlation'):+.3f}` | {p.get('relationship')} |")
         elif "trend_table" in calc:
             lines.append(f"| Period ({calc.get('freq_label', 'Time')}) | Event Count | Total Value |")
             lines.append("| :--- | :--- | :--- |")
@@ -260,6 +266,8 @@ def report_markdown(
             for k, v in calc.items():
                 if isinstance(v, (int, float, str, bool)):
                     lines.append(f"- **{k.replace('_', ' ').title()}:** {v}")
+                elif isinstance(v, list) and v and isinstance(v[0], (int, float, str)):
+                    lines.append(f"- **{k.replace('_', ' ').title()}:** {', '.join(str(i) for i in v[:10])}")
     else:
         lines.append("- *(No calculation metrics available)*")
 
