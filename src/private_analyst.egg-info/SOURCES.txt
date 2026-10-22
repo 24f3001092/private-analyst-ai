@@ -52,6 +52,7 @@ src/private_analyst/ui/streamlit_app.py
 src/private_analyst/viz/__init__.py
 src/private_analyst/viz/charts.py
 tests/test_ai_and_operations.py
+tests/test_ask_explain_flow.py
 tests/test_audit_integration.py
 tests/test_backup_offline.py
 tests/test_cleaning_pipeline.py
