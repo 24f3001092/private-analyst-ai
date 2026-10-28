@@ -210,13 +210,13 @@ def _login(cfg) -> None:
 
 
 def _sidebar(cfg) -> None:
-    # BetterAnalyst Brand Header
+    # VantageAnalyst Unique Brand Header
     st.sidebar.markdown(
         """
         <div class="ba-sidebar-brand">
             <div class="ba-logo-wrap">
-                <div class="ba-logo-icon">b</div>
-                <span class="ba-logo-text">betteranalyst</span>
+                <div class="ba-logo-icon">V</div>
+                <span class="ba-logo-text">vantageanalyst</span>
             </div>
             <div class="ba-header-icons">
                 <span title="Toggle Dark/Light Mode" style="cursor:pointer;">🌙</span>
@@ -238,8 +238,17 @@ def _sidebar(cfg) -> None:
         unsafe_allow_html=True,
     )
 
-    if st.sidebar.button("+ New chat", key="ba_new_chat_btn", use_container_width=True):
+    st.sidebar.markdown('<div class="ba-new-chat-wrapper">', unsafe_allow_html=True)
+    c_new_chat = st.sidebar.button("+ New chat", key="ba_new_chat_btn", use_container_width=True)
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
+
+    if c_new_chat:
         st.session_state["active_menu"] = "Dashboards"
+        st.session_state["ba_chat_prompt_input"] = ""
+        st.session_state.last_result = None
+        st.session_state.last_explanation = None
+        st.session_state["last_user_query"] = None
+        st.session_state["show_uploader_modal"] = False
         st.rerun()
 
     curr_menu = st.session_state.get("active_menu", "Dashboards")
@@ -259,6 +268,8 @@ def _sidebar(cfg) -> None:
     st.sidebar.markdown('<div class="ba-nav-section-title">TOOLS</div>', unsafe_allow_html=True)
     c_pdf = st.sidebar.button("📄  PDF to Excel", key="nav_pdf", use_container_width=True, type="primary" if curr_menu == "PDF to Excel" else "secondary")
     c_slack = st.sidebar.button("💬  Slack Agent", key="nav_slack", use_container_width=True, type="primary" if curr_menu == "Slack Agent" else "secondary")
+    c_sql = st.sidebar.button("💻  SQL Console", key="nav_sql", use_container_width=True, type="primary" if curr_menu == "SQL Console" else "secondary")
+    c_settings = st.sidebar.button("⚙️  Settings", key="nav_settings", use_container_width=True, type="primary" if curr_menu == "Settings" else "secondary")
 
     if c_dash:
         st.session_state["active_menu"] = "Dashboards"
@@ -290,6 +301,12 @@ def _sidebar(cfg) -> None:
     elif c_slack:
         st.session_state["active_menu"] = "Slack Agent"
         st.rerun()
+    elif c_sql:
+        st.session_state["active_menu"] = "SQL Console"
+        st.rerun()
+    elif c_settings:
+        st.session_state["active_menu"] = "Settings"
+        st.rerun()
 
     st.sidebar.markdown(
         """
@@ -319,39 +336,39 @@ def _sidebar(cfg) -> None:
         unsafe_allow_html=True,
     )
 
-    st.sidebar.title(cfg.branding.product_name)
-    st.sidebar.caption(f"Version {__version__} · {cfg.server.edition} edition")
-    user: User = st.session_state.user
-    if user:
-        st.sidebar.write(f"User: `{user.username}`")
-        st.sidebar.write(f"Organization: `{user.org_id}`")
-    st.sidebar.info(
-        "Customer data stays on this computer. "
-        "There is no cloud AI API. Telemetry is disabled."
-    )
-    model_host = f"{cfg.ai.host}:{cfg.ai.port}"
-    st.sidebar.write(f"Local model target: `{model_host}` / `{cfg.ai.model}`")
-    st.sidebar.write("Uploads are kept in memory unless you export them.")
+    with st.sidebar.expander("ℹ️ System & Privacy Details", expanded=False):
+        st.caption(f"{cfg.branding.product_name} · v{__version__} ({cfg.server.edition})")
+        user: User = st.session_state.user
+        if user:
+            st.sidebar.write(f"User: `{user.username}`")
+            st.sidebar.write(f"Organization: `{user.org_id}`")
+        st.sidebar.info(
+            "Customer data stays on this computer. "
+            "There is no cloud AI API. Telemetry is disabled."
+        )
+        model_host = f"{cfg.ai.host}:{cfg.ai.port}"
+        st.sidebar.write(f"Local model target: `{model_host}` / `{cfg.ai.model}`")
+        st.sidebar.write("Uploads are kept in memory unless you export them.")
 
-    ingest_val = st.session_state.get("ingest")
-    if isinstance(ingest_val, IngestResult):
-        st.sidebar.divider()
-        st.sidebar.subheader("Active Dataset")
-        source_name = getattr(ingest_val, "source_name", None)
-        if source_name:
-            st.sidebar.markdown(f"**Source:** `{Path(str(source_name)).name}`")
-        if getattr(ingest_val, "sheet_name", None):
-            st.sidebar.caption(f"Sheet: `{ingest_val.sheet_name}`")
-        frame = getattr(ingest_val, "frame", None)
-        if frame is not None and hasattr(frame, "shape"):
-            try:
-                rows, cols = int(frame.shape[0]), int(frame.shape[1])
-                st.sidebar.caption(f"Shape: **{rows:,} rows × {cols} cols**")
-            except Exception:
-                pass
-        ops = getattr(ingest_val, "cleaning_log", None) or getattr(ingest_val, "cleaning_operations", [])
-        if isinstance(ops, list):
-            st.sidebar.caption(f"Cleaning Log: **{len(ops)} operation(s)**")
+        ingest_val = st.session_state.get("ingest")
+        if isinstance(ingest_val, IngestResult):
+            st.sidebar.divider()
+            st.sidebar.subheader("Active Dataset")
+            source_name = getattr(ingest_val, "source_name", None)
+            if source_name:
+                st.sidebar.markdown(f"**Source:** `{Path(str(source_name)).name}`")
+            if getattr(ingest_val, "sheet_name", None):
+                st.sidebar.caption(f"Sheet: `{ingest_val.sheet_name}`")
+            frame = getattr(ingest_val, "frame", None)
+            if frame is not None and hasattr(frame, "shape"):
+                try:
+                    rows, cols = int(frame.shape[0]), int(frame.shape[1])
+                    st.sidebar.caption(f"Shape: **{rows:,} rows × {cols} cols**")
+                except Exception:
+                    pass
+            ops = getattr(ingest_val, "cleaning_log", None) or getattr(ingest_val, "cleaning_operations", [])
+            if isinstance(ops, list):
+                st.sidebar.caption(f"Cleaning Log: **{len(ops)} operation(s)**")
 
     if cfg.server.require_auth:
         if st.sidebar.button("Sign out"):
@@ -2428,20 +2445,120 @@ def _inject_custom_styles() -> None:
             margin-bottom: 12px;
         }
 
-        /* + New Chat Button */
-        div[data-testid="stSidebar"] button[key="ba_new_chat_btn"] {
-            background-color: rgba(99, 102, 241, 0.16) !important;
-            color: #EEF2FF !important;
-            border: 1px solid rgba(99, 102, 241, 0.45) !important;
-            border-radius: 20px !important;
-            font-weight: 600 !important;
+        /* Sidebar Nav Buttons: Sleek, transparent dark-theme items (No White/Red blocks) */
+        [data-testid="stSidebar"] button,
+        [data-testid="stSidebar"] [data-testid="baseButton-secondary"],
+        [data-testid="stSidebar"] div[data-testid="stButton"] button {
+            background-color: transparent !important;
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #94A3B8 !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 7px 12px !important;
             font-size: 13px !important;
-            padding: 6px 16px !important;
-            margin-bottom: 12px !important;
+            font-weight: 500 !important;
+            border-radius: 6px !important;
+            width: 100% !important;
+            margin-bottom: 2px !important;
+            cursor: pointer !important;
         }
-        div[data-testid="stSidebar"] button[key="ba_new_chat_btn"]:hover {
-            background-color: rgba(99, 102, 241, 0.28) !important;
-            border-color: #818CF8 !important;
+
+        [data-testid="stSidebar"] button p,
+        [data-testid="stSidebar"] [data-testid="baseButton-secondary"] p,
+        [data-testid="stSidebar"] div[data-testid="stButton"] button p {
+            color: #94A3B8 !important;
+            font-size: 13px !important;
+            font-weight: 500 !important;
+            margin: 0 !important;
+        }
+
+        [data-testid="stSidebar"] button:hover,
+        [data-testid="stSidebar"] [data-testid="baseButton-secondary"]:hover,
+        [data-testid="stSidebar"] div[data-testid="stButton"] button:hover {
+            background-color: rgba(255, 255, 255, 0.06) !important;
+            background: rgba(255, 255, 255, 0.06) !important;
+            color: #FFFFFF !important;
+            border: none !important;
+        }
+
+        [data-testid="stSidebar"] button:hover p,
+        [data-testid="stSidebar"] [data-testid="baseButton-secondary"]:hover p,
+        [data-testid="stSidebar"] div[data-testid="stButton"] button:hover p {
+            color: #FFFFFF !important;
+        }
+
+        /* Active Nav Button - Elegant Soft Blue, ZERO RED */
+        [data-testid="stSidebar"] button[kind="primary"],
+        [data-testid="stSidebar"] [data-testid="baseButton-primary"],
+        [data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"] {
+            background-color: rgba(59, 130, 246, 0.14) !important;
+            background: rgba(59, 130, 246, 0.14) !important;
+            color: #60A5FA !important;
+            font-weight: 600 !important;
+            border-left: 3px solid #3B82F6 !important;
+            border-radius: 0 6px 6px 0 !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 7px 12px !important;
+            width: 100% !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid="stSidebar"] button[kind="primary"] p,
+        [data-testid="stSidebar"] [data-testid="baseButton-primary"] p {
+            color: #60A5FA !important;
+            font-weight: 600 !important;
+            margin: 0 !important;
+        }
+
+        /* + New Chat Button: Sleek, pill-shaped indigo action button */
+        .ba-new-chat-wrapper {
+            margin: 4px 0 14px 0 !important;
+            padding: 0 !important;
+        }
+        .ba-new-chat-wrapper button,
+        .ba-new-chat-wrapper [data-testid="baseButton-secondary"],
+        .ba-new-chat-wrapper [data-testid="baseButton-primary"],
+        .ba-new-chat-wrapper div[data-testid="stButton"] button {
+            background: linear-gradient(135deg, #1E1B4B 0%, #312E81 100%) !important;
+            background-color: #1E1B4B !important;
+            color: #EEF2FF !important;
+            border: 1px solid rgba(129, 140, 248, 0.45) !important;
+            border-radius: 24px !important;
+            font-weight: 600 !important;
+            font-size: 13.5px !important;
+            letter-spacing: 0.02em !important;
+            justify-content: center !important;
+            text-align: center !important;
+            padding: 9px 18px !important;
+            width: 100% !important;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
+            transition: all 0.2s ease-in-out !important;
+        }
+        .ba-new-chat-wrapper button:hover,
+        .ba-new-chat-wrapper [data-testid="baseButton-secondary"]:hover,
+        .ba-new-chat-wrapper [data-testid="baseButton-primary"]:hover,
+        .ba-new-chat-wrapper div[data-testid="stButton"] button:hover {
+            background: linear-gradient(135deg, #2E1065 0%, #4338CA 100%) !important;
+            background-color: #4338CA !important;
+            border-color: #A5B4FC !important;
+            color: #FFFFFF !important;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35) !important;
+        }
+        .ba-new-chat-wrapper button p,
+        .ba-new-chat-wrapper [data-testid="baseButton-secondary"] p,
+        .ba-new-chat-wrapper [data-testid="baseButton-primary"] p {
+            color: #EEF2FF !important;
+            font-weight: 600 !important;
+            font-size: 13.5px !important;
+            margin: 0 !important;
+        }
+        .ba-new-chat-wrapper button:hover p,
+        .ba-new-chat-wrapper [data-testid="baseButton-secondary"]:hover p,
+        .ba-new-chat-wrapper [data-testid="baseButton-primary"]:hover p {
+            color: #FFFFFF !important;
         }
 
         /* Sidebar Section Titles */
@@ -2454,29 +2571,6 @@ def _inject_custom_styles() -> None:
             margin-top: 10px !important;
             margin-bottom: 4px !important;
             padding-left: 6px !important;
-        }
-
-        /* Sidebar Nav Buttons */
-        div[data-testid="stSidebar"] button {
-            text-align: left !important;
-            justify-content: flex-start !important;
-            padding: 5px 10px !important;
-            font-size: 12.5px !important;
-            font-weight: 500 !important;
-            border-radius: 6px !important;
-            border: none !important;
-            background: transparent !important;
-            color: #94A3B8 !important;
-            margin-bottom: 1px !important;
-        }
-        div[data-testid="stSidebar"] button:hover {
-            background: rgba(255, 255, 255, 0.05) !important;
-            color: #F8FAFC !important;
-        }
-        div[data-testid="stSidebar"] button[kind="primary"] {
-            background: rgba(59, 130, 246, 0.16) !important;
-            color: #60A5FA !important;
-            font-weight: 600 !important;
         }
 
         /* Slack Banner in Sidebar */
@@ -2715,11 +2809,205 @@ def _inject_custom_styles() -> None:
     )
 
 
+def _connectors_tab(cfg, user: User) -> None:
+    st.markdown("### 🔌 Data Connectors & Local Pipelines")
+    st.caption("Secure, air-gapped data ingestion from local sources without external transmission.")
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        st.markdown(
+            """
+            <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:20px;">📄</span>
+                        <div>
+                            <div style="font-weight:700; color:#0F172A; font-size:14px;">Local Files (CSV / XLSX / Parquet)</div>
+                            <div style="color:#64748B; font-size:12px;">Direct file upload & in-memory buffer</div>
+                        </div>
+                    </div>
+                    <span style="background:#DCFCE7; color:#15803D; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px;">ACTIVE</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.session_state.get("ingest") is not None:
+            source_name = getattr(st.session_state.ingest, "source_name", "dataset")
+            st.success(f"Connected: `{Path(str(source_name)).name}` ({len(st.session_state.ingest.frame):,} rows)")
+        else:
+            st.info("No file currently connected.")
+
+        st.markdown(
+            """
+            <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:20px;">🦆</span>
+                        <div>
+                            <div style="font-weight:700; color:#0F172A; font-size:14px;">DuckDB In-Memory OLAP Engine</div>
+                            <div style="color:#64748B; font-size:12px;">Vectorized local columnar SQL execution</div>
+                        </div>
+                    </div>
+                    <span style="background:#DCFCE7; color:#15803D; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px;">READY</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Query with DuckDB SQL", key="btn_duckdb_goto", use_container_width=True):
+            st.session_state["active_menu"] = "SQL Console"
+            st.rerun()
+
+    with col_c2:
+        st.markdown(
+            """
+            <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:20px;">🗄️</span>
+                        <div>
+                            <div style="font-weight:700; color:#0F172A; font-size:14px;">SQLite Local Storage</div>
+                            <div style="color:#64748B; font-size:12px;">Audit logs, user credentials, and session state</div>
+                        </div>
+                    </div>
+                    <span style="background:#DCFCE7; color:#15803D; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px;">CONNECTED</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        db_path = cfg.resolved_data_dir() / "app.db"
+        st.caption(f"Database path: `{db_path}` ({db_path.stat().st_size if db_path.exists() else 0:,} bytes)")
+
+        st.markdown(
+            """
+            <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:20px;">🔄</span>
+                        <div>
+                            <div style="font-weight:700; color:#0F172A; font-size:14px;">Directory Hot-Folder Watcher</div>
+                            <div style="color:#64748B; font-size:12px;">Ingest new files dropped into local folder</div>
+                        </div>
+                    </div>
+                    <span style="background:#FEF3C7; color:#B45309; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px;">STANDBY</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        watch_folder = st.text_input("Watch Folder Path", value=str(Path("samples").resolve()), key="conn_watch_path")
+        if st.button("Scan Folder Now", key="btn_scan_folder", use_container_width=True):
+            p = Path(watch_folder)
+            if p.exists() and p.is_dir():
+                found_files = list(p.glob("*.csv")) + list(p.glob("*.xlsx"))
+                st.success(f"Found {len(found_files)} data files in directory.")
+            else:
+                st.error("Specified directory was not found.")
+
+
+def _agents_hub_tab(cfg, user: User) -> None:
+    st.markdown("### 👥 Specialist Multi-Agent Hub")
+    st.caption("Autonomous and semi-autonomous local analytical agents running on your machine via Ollama.")
+
+    st.markdown(
+        f"""
+        <div style="background:#EEF2FF; border:1px solid #C7D2FE; border-radius:10px; padding:12px 16px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:22px;">⚡</span>
+                <div>
+                    <div style="font-weight:700; color:#1E1B4B; font-size:13.5px;">Active AI Model Engine: {cfg.ai.model}</div>
+                    <div style="color:#4338CA; font-size:12px;">Endpoint: {cfg.ai.host}:{cfg.ai.port} · Context window: {cfg.ai.context_window} tokens · Telemetry: Disabled</div>
+                </div>
+            </div>
+            <span style="background:#312E81; color:#EEF2FF; font-size:11px; font-weight:700; padding:4px 10px; border-radius:12px;">AIR-GAPPED</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    specialist_agents = [
+        ("Spreadsheet Auditor", "Lead Agent", "Scans datasets for null anomalies, type mismatches, outliers, and formula drift.", "Alerts", "Run Quality Audit"),
+        ("Operations Performance Specialist", "Specialist", "Analyzes timeline windows, delivery formats, schedule distributions, and operational bottlenecks.", "Explore Data", "Analyze Operations"),
+        ("Marketing Performance Specialist", "Specialist", "Performs audience segmentation, channel breakdowns, categorical frequency, and domain coverage.", "Explore Data", "Analyze Categories"),
+        ("Forecast & Scenario Specialist", "Specialist", "Generates linear trend projections, predictive clustering, regression models, and what-if scenarios.", "Agents_ML", "Launch Forecaster"),
+        ("Revenue & Margin Analysis Specialist", "Specialist", "Executes high-performance SQL calculations, prize pool aggregations, and financial metrics.", "SQL Console", "Open SQL Console"),
+    ]
+
+    for title, role, desc, target_tab, btn_text in specialist_agents:
+        st.markdown(
+            f"""
+            <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-radius:10px; padding:14px 18px; margin-bottom:10px;">
+                <div style="display:flex; align-items:flex-start; gap:12px;">
+                    <div style="width:34px; height:34px; border-radius:8px; background:linear-gradient(135deg, #6366F1, #3B82F6); display:flex; align-items:center; justify-content:center; color:#fff; font-size:16px;">👤</div>
+                    <div>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span style="font-weight:700; color:#0F172A; font-size:14px;">{title}</span>
+                            <span style="background:#F1F5F9; color:#475569; font-size:10.5px; font-weight:600; padding:1px 6px; border-radius:4px;">{role}</span>
+                        </div>
+                        <div style="color:#64748B; font-size:12px; margin-top:2px;">{desc}</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        col_a1, col_a2 = st.columns([5, 1.5])
+        with col_a2:
+            if st.button(btn_text, key=f"btn_agent_act_{title}", use_container_width=True):
+                if target_tab == "Agents_ML":
+                    st.session_state["show_ml_subtab"] = True
+                else:
+                    st.session_state["active_menu"] = target_tab
+                st.rerun()
+
+    if st.session_state.get("show_ml_subtab", False):
+        st.divider()
+        st.subheader("Forecast & Scenario Engine (Machine Learning)")
+        _ml_tab(cfg, user)
+
+
+def _tasks_hub_tab(cfg, user: User) -> None:
+    st.markdown("### ⚡ Data Tasks & Automated Pipelines")
+    st.caption("Schedule and execute automated cleaning routines, column repairs, and pipeline transformations.")
+
+    task_tab1, task_tab2 = st.tabs(["Data Cleaning Tasks", "Column & Header Repair"])
+    with task_tab1:
+        _clean_tab(cfg, user)
+    with task_tab2:
+        _repair_tab(cfg, user)
+
+
+def _slack_hub_tab(cfg, user: User) -> None:
+    st.markdown("### 💬 Slack Local Integration Daemon")
+    st.caption("Interact with your local analytical models directly through Slack using private loopback webhooks.")
+
+    st.markdown(
+        """
+        <div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px; margin-bottom:16px;">
+            <div style="font-weight:700; color:#0F172A; font-size:14px; margin-bottom:4px;">Private Loopback Webhook Integration</div>
+            <div style="color:#64748B; font-size:12.5px; margin-bottom:10px;">
+                Events are processed strictly through local loopback (`127.0.0.1`). Customer dataset bytes are never transmitted off this machine.
+            </div>
+            <div style="font-family:monospace; background:#0F172A; color:#38BDF8; padding:8px 12px; border-radius:6px; font-size:12px;">
+                http://127.0.0.1:8501/api/slack/events
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("### Reports & Data Export")
+    _reports_tab(cfg, user)
+
+
 def _render_betteranalyst_top_bar() -> None:
     st.markdown(
         """
         <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid #F1F5F9; margin-bottom: 18px;">
             <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #64748B;">
+                <span style="font-weight:700; color:#0F172A; font-size:13.5px;">VantageAnalyst AI</span>
+                <span style="color:#CBD5E1;">·</span>
                 <span>Free plan</span>
                 <span style="color:#CBD5E1;">·</span>
                 <a href="#upgrade" style="color: #4F46E5; font-weight: 600; text-decoration: underline;">Upgrade</a>
@@ -2921,8 +3209,48 @@ def _render_betteranalyst_chat_dashboard(cfg, user: User) -> None:
     with st.expander("📋 View 22 Hackathon Listings Data Table", expanded=False):
         sample_path = Path("samples/2026-10-17T20-05_export.csv")
         if sample_path.exists():
-            df_hack = pd.read_csv(sample_path)
-            st.dataframe(df_hack, use_container_width=True, height=240)
+            try:
+                df_hack = pd.read_csv(sample_path)
+            except Exception:
+                try:
+                    df_hack = pd.read_csv(sample_path, on_bad_lines="skip")
+                except Exception:
+                    df_hack = pd.DataFrame()
+            if not df_hack.empty:
+                st.dataframe(df_hack, use_container_width=True, height=240)
+
+    # 4.5 Dynamic Chat Query & AI Response Display
+    if st.session_state.get("last_user_query"):
+        st.markdown(
+            f"""
+            <div class="user-chat-bubble-container" style="margin-top:16px;">
+                <div class="user-chat-bubble">
+                    {st.session_state.last_user_query}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.session_state.get("last_explanation") or st.session_state.get("last_result") is not None:
+            st.markdown(
+                """
+                <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-radius:12px; padding:18px 22px; margin-top:12px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                        <div style="width:22px; height:22px; border-radius:5px; background:linear-gradient(135deg, #6366F1, #3B82F6); display:flex; align-items:center; justify-content:center; color:#fff; font-size:12px; font-weight:800;">V</div>
+                        <span style="font-weight:700; color:#0F172A; font-size:13.5px;">VantageAnalyst AI</span>
+                    </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.session_state.get("last_explanation"):
+                st.markdown(st.session_state.last_explanation)
+            if st.session_state.get("last_result") is not None:
+                res = st.session_state.last_result
+                if getattr(res, "summary", None):
+                    st.caption(f"**Summary:** {res.summary}")
+                if getattr(res, "data", None) is not None and not res.data.empty:
+                    st.dataframe(res.data, use_container_width=True, height=220)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     # 5. Floating Bottom Input Box
     st.markdown(
@@ -2988,7 +3316,8 @@ def _render_betteranalyst_chat_dashboard(cfg, user: User) -> None:
                     op_res = run_operation(st.session_state.ingest, user_q)
                     st.session_state.last_result = op_res
                     st.session_state.last_explanation = explain_results(op_res, user_q, cfg.ai)
-                    st.success(f"Analysis complete for intent: '{op_res.intent}'")
+                    st.session_state["last_user_query"] = user_q
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"Analysis error: {exc}")
         else:
@@ -3053,7 +3382,18 @@ def _render_betteranalyst_workspace_panel(cfg, user: User) -> None:
             )
         with c2:
             if st.button("→", key=key, help=f"Activate {title}"):
-                st.session_state["active_menu"] = "Alerts" if "Auditor" in title else "Explore Data"
+                if "Auditor" in title:
+                    st.session_state["active_menu"] = "Alerts"
+                elif "Operations" in title:
+                    st.session_state["active_menu"] = "Explore Data"
+                elif "Marketing" in title:
+                    st.session_state["active_menu"] = "Explore Data"
+                elif "Forecast" in title:
+                    st.session_state["active_menu"] = "Agents"
+                elif "Revenue" in title:
+                    st.session_state["active_menu"] = "SQL Console"
+                else:
+                    st.session_state["active_menu"] = "Explore Data"
                 st.rerun()
 
     # Brand Kit Section
@@ -3062,19 +3402,29 @@ def _render_betteranalyst_workspace_panel(cfg, user: User) -> None:
         <div style="margin-top:16px; margin-bottom:8px;">
             <span style="color:#0F172A; font-size:11.5px; font-weight:700; letter-spacing:0.04em;">BRAND KIT</span>
         </div>
-        <div class="ba-agent-card" style="cursor:pointer;">
-            <div class="ba-agent-left">
-                <div class="ba-agent-avatar" style="background:#FEF3C7; color:#D97706;">🎨</div>
-                <div class="ba-agent-info">
-                    <span class="ba-agent-title">Customize charts</span>
-                    <span class="ba-agent-role">Apply your visual identity</span>
-                </div>
-            </div>
-            <span style="color:#64748B; font-size:12px;">→</span>
-        </div>
         """,
         unsafe_allow_html=True,
     )
+    c_b1, c_b2 = st.columns([4, 1])
+    with c_b1:
+        st.markdown(
+            """
+            <div class="ba-agent-card">
+                <div class="ba-agent-left">
+                    <div class="ba-agent-avatar" style="background:#FEF3C7; color:#D97706;">🎨</div>
+                    <div class="ba-agent-info">
+                        <span class="ba-agent-title">Customize charts</span>
+                        <span class="ba-agent-role">Apply your visual identity</span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c_b2:
+        if st.button("→", key="nav_brand_kit", help="Customize brand kit and settings"):
+            st.session_state["active_menu"] = "Settings"
+            st.rerun()
 
     # Uploads Section
     active_filename = "2026-10-17T20-05_expor..."
@@ -3083,39 +3433,48 @@ def _render_betteranalyst_workspace_panel(cfg, user: User) -> None:
         active_filename = raw_name[:18] + "..." if len(raw_name) > 18 else raw_name
 
     st.markdown(
-        f"""
+        """
         <div style="margin-top:16px; margin-bottom:8px;">
             <span style="color:#0F172A; font-size:11.5px; font-weight:700; letter-spacing:0.04em;">UPLOADS</span>
         </div>
-        <div class="ba-agent-card">
-            <div class="ba-agent-left">
-                <div class="ba-agent-avatar" style="background:#E0F2FE; color:#0284C7;">📄</div>
-                <div class="ba-agent-info">
-                    <span class="ba-agent-title">{active_filename}</span>
-                    <span class="ba-agent-role">Spreadsheet</span>
+        """,
+        unsafe_allow_html=True,
+    )
+    c_u1, c_u2 = st.columns([4, 1])
+    with c_u1:
+        st.markdown(
+            f"""
+            <div class="ba-agent-card">
+                <div class="ba-agent-left">
+                    <div class="ba-agent-avatar" style="background:#E0F2FE; color:#0284C7;">📄</div>
+                    <div class="ba-agent-info">
+                        <span class="ba-agent-title">{active_filename}</span>
+                        <span class="ba-agent-role">Spreadsheet</span>
+                    </div>
                 </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            """,
+            unsafe_allow_html=True,
+        )
+    with c_u2:
+        if st.button("→", key="nav_uploads_manage", help="Manage datasets in Library"):
+            st.session_state["active_menu"] = "Library"
+            st.rerun()
 
-    # Floating feedback button
-    st.markdown(
-        """
-        <div class="ba-floating-feedback">
-            <span>💬</span>
-            <span>Feedback</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Feedback Section
+    st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
+    if st.button("💬 Feedback", key="ba_feedback_btn", use_container_width=True, help="Send local feedback"):
+        st.session_state["show_feedback_dialog"] = not st.session_state.get("show_feedback_dialog", False)
+        st.rerun()
+
+    if st.session_state.get("show_feedback_dialog", False):
+        st.info("Local Feedback: Thanks for using VantageAnalyst AI! All features run 100% offline.")
 
 
 def main() -> None:
     os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
     cfg = load_config()
-    st.set_page_config(page_title="betteranalyst", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="VantageAnalyst AI", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     _inject_custom_styles()
     _init_state(cfg)
     if cfg.server.edition == "server":
@@ -3130,54 +3489,67 @@ def main() -> None:
         _login(cfg)
         return
 
+    # Auto-bind sample dataset if ingest is None so all tabs and tools work out-of-the-box
+    if st.session_state.get("ingest") is None:
+        sample_path = Path("samples/2026-10-17T20-05_export.csv")
+        if sample_path.exists():
+            try:
+                st.session_state.ingest = load_tabular(
+                    sample_path.read_bytes(),
+                    sample_path.name,
+                    cfg.limits,
+                )
+            except Exception as e:
+                logger.warning("Could not auto-bind sample dataset: %s", e)
+
     _sidebar(cfg)
 
     # Route view according to active navigation selection
     active_menu = st.session_state.get("active_menu", "Dashboards")
 
-    if active_menu == "Dashboards":
-        col_main, col_workspace = st.columns([3.8, 1.4], gap="medium")
-        with col_main:
-            _render_betteranalyst_top_bar()
+    col_main, col_workspace = st.columns([3.8, 1.4], gap="medium")
+    with col_main:
+        _render_betteranalyst_top_bar()
+        if active_menu == "Dashboards":
             _render_betteranalyst_chat_dashboard(cfg, st.session_state.user)
-        with col_workspace:
-            _render_betteranalyst_workspace_panel(cfg, st.session_state.user)
-    else:
-        # Specialized view wrapper with return button
-        c_back, c_title = st.columns([1.5, 6])
-        with c_back:
-            if st.button("← Back to Dashboard", key="ba_back_to_dash"):
-                st.session_state["active_menu"] = "Dashboards"
-                st.rerun()
-        with c_title:
-            st.subheader(f"Workspace: {active_menu}")
-
-        if active_menu == "Explore Data":
-            _explore_tab(cfg, st.session_state.user)
-        elif active_menu == "Library":
-            _import_tab(cfg, st.session_state.user)
-        elif active_menu == "Data Flows":
-            _clean_tab(cfg, st.session_state.user)
-            st.divider()
-            _repair_tab(cfg, st.session_state.user)
-        elif active_menu == "Alerts":
-            _quality_tab(cfg, st.session_state.user)
-        elif active_menu == "PDF to Excel":
-            _documents_tab(cfg, st.session_state.user)
-        elif active_menu == "SQL Console":
-            _sql_tab(cfg, st.session_state.user)
-        elif active_menu == "Agents":
-            st.info("Specialist AI Agents are active in the local runtime environment.")
-            _ml_tab(cfg, st.session_state.user)
-        elif active_menu == "Tasks":
-            _repair_tab(cfg, st.session_state.user)
-        elif active_menu == "Slack Agent":
-            st.info("Slack local integration daemon: Connect your local data model to Slack via loopback webhook.")
-            _reports_tab(cfg, st.session_state.user)
-        elif active_menu == "Settings":
-            _settings_tab(cfg, st.session_state.user)
         else:
-            _explore_tab(cfg, st.session_state.user)
+            c_back, c_title = st.columns([1.5, 6])
+            with c_back:
+                if st.button("← Back to Dashboard", key="ba_back_to_dash"):
+                    st.session_state["active_menu"] = "Dashboards"
+                    st.rerun()
+            with c_title:
+                st.subheader(f"Workspace: {active_menu}")
+
+            if active_menu == "Explore Data":
+                _explore_tab(cfg, st.session_state.user)
+            elif active_menu == "Library":
+                _import_tab(cfg, st.session_state.user)
+            elif active_menu == "Data Connectors":
+                _connectors_tab(cfg, st.session_state.user)
+            elif active_menu == "Data Flows":
+                _clean_tab(cfg, st.session_state.user)
+                st.divider()
+                _repair_tab(cfg, st.session_state.user)
+            elif active_menu == "Alerts":
+                _quality_tab(cfg, st.session_state.user)
+            elif active_menu == "PDF to Excel":
+                _documents_tab(cfg, st.session_state.user)
+            elif active_menu == "SQL Console":
+                _sql_tab(cfg, st.session_state.user)
+            elif active_menu == "Agents":
+                _agents_hub_tab(cfg, st.session_state.user)
+            elif active_menu == "Tasks":
+                _tasks_hub_tab(cfg, st.session_state.user)
+            elif active_menu == "Slack Agent":
+                _slack_hub_tab(cfg, st.session_state.user)
+            elif active_menu == "Settings":
+                _settings_tab(cfg, st.session_state.user)
+            else:
+                _explore_tab(cfg, st.session_state.user)
+
+    with col_workspace:
+        _render_betteranalyst_workspace_panel(cfg, st.session_state.user)
 
 
 if __name__ == "__main__":
