@@ -210,11 +210,121 @@ def _login(cfg) -> None:
 
 
 def _sidebar(cfg) -> None:
+    # BetterAnalyst Brand Header
+    st.sidebar.markdown(
+        """
+        <div class="ba-sidebar-brand">
+            <div class="ba-logo-wrap">
+                <div class="ba-logo-icon">b</div>
+                <span class="ba-logo-text">betteranalyst</span>
+            </div>
+            <div class="ba-header-icons">
+                <span title="Toggle Dark/Light Mode" style="cursor:pointer;">🌙</span>
+                <span title="Collapse Sidebar" style="cursor:pointer;">◫</span>
+            </div>
+        </div>
+        <div class="ba-workspace-card">
+            <div class="ba-workspace-left">
+                <span class="ba-badge-avatar">S</span>
+                <span class="ba-workspace-name">Personal</span>
+            </div>
+            <span style="color:#64748B; font-size:12px;">⌵</span>
+        </div>
+        <div class="ba-projects-link">
+            <span>All projects</span>
+            <span style="font-size:10px;">⌵</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.sidebar.button("+ New chat", key="ba_new_chat_btn", use_container_width=True):
+        st.session_state["active_menu"] = "Dashboards"
+        st.rerun()
+
+    curr_menu = st.session_state.get("active_menu", "Dashboards")
+
+    st.sidebar.markdown('<div class="ba-nav-section-title">CREATE</div>', unsafe_allow_html=True)
+    c_dash = st.sidebar.button("⊞  Dashboards", key="nav_dash", use_container_width=True, type="primary" if curr_menu == "Dashboards" else "secondary")
+    c_agents = st.sidebar.button("👥  Agents", key="nav_agents", use_container_width=True, type="primary" if curr_menu == "Agents" else "secondary")
+    c_tasks = st.sidebar.button("⚡  Tasks", key="nav_tasks", use_container_width=True, type="primary" if curr_menu == "Tasks" else "secondary")
+
+    st.sidebar.markdown('<div class="ba-nav-section-title">DATA</div>', unsafe_allow_html=True)
+    c_explore = st.sidebar.button("🌐  Explore Data", key="nav_explore", use_container_width=True, type="primary" if curr_menu == "Explore Data" else "secondary")
+    c_library = st.sidebar.button("📁  Library", key="nav_library", use_container_width=True, type="primary" if curr_menu == "Library" else "secondary")
+    c_connect = st.sidebar.button("🔌  Data Connectors", key="nav_connectors", use_container_width=True, type="primary" if curr_menu == "Data Connectors" else "secondary")
+    c_flows = st.sidebar.button("🔀  Data Flows", key="nav_flows", use_container_width=True, type="primary" if curr_menu == "Data Flows" else "secondary")
+    c_alerts = st.sidebar.button("🔔  Alerts", key="nav_alerts", use_container_width=True, type="primary" if curr_menu == "Alerts" else "secondary")
+
+    st.sidebar.markdown('<div class="ba-nav-section-title">TOOLS</div>', unsafe_allow_html=True)
+    c_pdf = st.sidebar.button("📄  PDF to Excel", key="nav_pdf", use_container_width=True, type="primary" if curr_menu == "PDF to Excel" else "secondary")
+    c_slack = st.sidebar.button("💬  Slack Agent", key="nav_slack", use_container_width=True, type="primary" if curr_menu == "Slack Agent" else "secondary")
+
+    if c_dash:
+        st.session_state["active_menu"] = "Dashboards"
+        st.rerun()
+    elif c_agents:
+        st.session_state["active_menu"] = "Agents"
+        st.rerun()
+    elif c_tasks:
+        st.session_state["active_menu"] = "Tasks"
+        st.rerun()
+    elif c_explore:
+        st.session_state["active_menu"] = "Explore Data"
+        st.rerun()
+    elif c_library:
+        st.session_state["active_menu"] = "Library"
+        st.rerun()
+    elif c_connect:
+        st.session_state["active_menu"] = "Data Connectors"
+        st.rerun()
+    elif c_flows:
+        st.session_state["active_menu"] = "Data Flows"
+        st.rerun()
+    elif c_alerts:
+        st.session_state["active_menu"] = "Alerts"
+        st.rerun()
+    elif c_pdf:
+        st.session_state["active_menu"] = "PDF to Excel"
+        st.rerun()
+    elif c_slack:
+        st.session_state["active_menu"] = "Slack Agent"
+        st.rerun()
+
+    st.sidebar.markdown(
+        """
+        <div class="ba-nav-section-title">BRAND & PUBLISH</div>
+        <div class="ba-slack-banner">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:16px;">💬</span>
+                <span style="color:#EEF2FF; font-size:12px; font-weight:500;">Chat with your data in Slack</span>
+            </div>
+            <span style="color:#818CF8; font-size:14px;">›</span>
+        </div>
+        <div class="ba-plan-card">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+                <span style="color:#F8FAFC; font-size:12px; font-weight:600;">Free plan</span>
+                <span class="ba-upgrade-btn">Upgrade</span>
+            </div>
+            <div style="color:#94A3B8; font-size:11px;">9 messages · 25 AI actions left</div>
+        </div>
+        <div class="ba-user-footer">
+            <div style="display:flex; align-items:center; gap:9px;">
+                <div class="ba-avatar-circle">S</div>
+                <span style="color:#F8FAFC; font-size:13px; font-weight:500;">Saurav Yadav</span>
+            </div>
+            <span style="color:#64748B; font-size:11px;">^</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.sidebar.title(cfg.branding.product_name)
     st.sidebar.caption(f"Version {__version__} · {cfg.server.edition} edition")
     user: User = st.session_state.user
-    st.sidebar.write(f"User: `{user.username}`")
-    st.sidebar.write(f"Organization: `{user.org_id}`")
+    if user:
+        st.sidebar.write(f"User: `{user.username}`")
+        st.sidebar.write(f"Organization: `{user.org_id}`")
     st.sidebar.info(
         "Customer data stays on this computer. "
         "There is no cloud AI API. Telemetry is disabled."
@@ -2205,42 +2315,798 @@ def _inject_custom_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container {
-            padding-top: 2rem !important;
-            padding-bottom: 2rem !important;
-            max-width: 1250px !important;
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
         }
-        h1 {
-            font-size: 1.85rem !important;
-            font-weight: 700 !important;
-            margin-bottom: 0.5rem !important;
-            letter-spacing: -0.02em !important;
+
+        /* Top header bar transparent */
+        header[data-testid="stHeader"] {
+            background-color: transparent !important;
+            height: 2.5rem !important;
         }
-        h2 {
-            font-size: 1.4rem !important;
-            font-weight: 600 !important;
-            margin-top: 1rem !important;
-            margin-bottom: 0.4rem !important;
+        #MainMenu, footer {
+            visibility: hidden !important;
         }
-        h3 {
-            font-size: 1.15rem !important;
-            font-weight: 600 !important;
-            margin-top: 0.8rem !important;
-            margin-bottom: 0.3rem !important;
+
+        /* Left Sidebar: Exact Dark Navy (#0A1128 / #0B132B) */
+        [data-testid="stSidebar"] {
+            background-color: #0A1128 !important;
+            border-right: 1px solid #172554 !important;
+            min-width: 250px !important;
+            max-width: 270px !important;
         }
-        [data-testid="stMetricValue"] {
-            font-size: 1.5rem !important;
-            font-weight: 700 !important;
+
+        [data-testid="stSidebar"] .block-container {
+            padding-top: 1rem !important;
+            padding-bottom: 1.5rem !important;
+            padding-left: 0.9rem !important;
+            padding-right: 0.9rem !important;
         }
-        .stTabs [data-baseweb="tab-list"] {
+
+        [data-testid="stSidebar"] * {
+            color: #94A3B8;
+        }
+
+        /* Sidebar Brand Header */
+        .ba-sidebar-brand {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 4px 12px 4px;
+        }
+        .ba-logo-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .ba-logo-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            background: #3B82F6;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #FFFFFF !important;
+            font-weight: 800;
+            font-size: 15px;
+            line-height: 1;
+        }
+        .ba-logo-text {
+            color: #FFFFFF !important;
+            font-weight: 700;
+            font-size: 16.5px;
+            letter-spacing: -0.3px;
+        }
+        .ba-header-icons {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #64748B !important;
+            font-size: 13.5px;
+        }
+
+        /* Workspace selector pill */
+        .ba-workspace-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            margin-bottom: 4px;
+            cursor: pointer;
+        }
+        .ba-workspace-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .ba-badge-avatar {
+            background: #3B82F6;
+            color: white !important;
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .ba-workspace-name {
+            color: #F8FAFC !important;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .ba-projects-link {
+            display: flex;
+            align-items: center;
             gap: 6px;
+            padding: 2px 10px;
+            color: #64748B !important;
+            font-size: 11.5px;
+            margin-bottom: 12px;
         }
-        .stTabs [data-baseweb="tab"] {
-            padding: 6px 14px;
-            font-size: 0.95rem;
+
+        /* + New Chat Button */
+        div[data-testid="stSidebar"] button[key="ba_new_chat_btn"] {
+            background-color: rgba(99, 102, 241, 0.16) !important;
+            color: #EEF2FF !important;
+            border: 1px solid rgba(99, 102, 241, 0.45) !important;
+            border-radius: 20px !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+            padding: 6px 16px !important;
+            margin-bottom: 12px !important;
+        }
+        div[data-testid="stSidebar"] button[key="ba_new_chat_btn"]:hover {
+            background-color: rgba(99, 102, 241, 0.28) !important;
+            border-color: #818CF8 !important;
+        }
+
+        /* Sidebar Section Titles */
+        .ba-nav-section-title {
+            color: #475569 !important;
+            font-size: 10px !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+            margin-top: 10px !important;
+            margin-bottom: 4px !important;
+            padding-left: 6px !important;
+        }
+
+        /* Sidebar Nav Buttons */
+        div[data-testid="stSidebar"] button {
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 5px 10px !important;
+            font-size: 12.5px !important;
+            font-weight: 500 !important;
+            border-radius: 6px !important;
+            border: none !important;
+            background: transparent !important;
+            color: #94A3B8 !important;
+            margin-bottom: 1px !important;
+        }
+        div[data-testid="stSidebar"] button:hover {
+            background: rgba(255, 255, 255, 0.05) !important;
+            color: #F8FAFC !important;
+        }
+        div[data-testid="stSidebar"] button[kind="primary"] {
+            background: rgba(59, 130, 246, 0.16) !important;
+            color: #60A5FA !important;
+            font-weight: 600 !important;
+        }
+
+        /* Slack Banner in Sidebar */
+        .ba-slack-banner {
+            padding: 9px 11px;
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 8px;
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+        }
+
+        /* Plan Indicator Card */
+        .ba-plan-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 14px;
+            margin-bottom: 8px;
+        }
+        .ba-upgrade-btn {
+            background: #6366F1;
+            color: white !important;
+            font-size: 10.5px;
+            font-weight: 600;
+            padding: 2px 9px;
+            border-radius: 12px;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        /* User Footer */
+        .ba-user-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 2px 2px 2px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .ba-avatar-circle {
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #F59E0B, #EF4444);
+            color: white !important;
+            font-size: 11px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Main Canvas Layout */
+        .main .block-container {
+            padding-top: 0.6rem !important;
+            padding-bottom: 2rem !important;
+            padding-left: 1.5rem !important;
+            padding-right: 1.5rem !important;
+            max-width: 1440px !important;
+        }
+
+        /* User Chat Bubble */
+        .user-chat-bubble-container {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 22px;
+            width: 100%;
+        }
+        .user-chat-bubble {
+            background: #EEF2FF;
+            border: 1px solid #E0E7FF;
+            color: #1E1B4B;
+            padding: 11px 18px;
+            border-radius: 18px 18px 4px 18px;
+            max-width: 82%;
+            font-size: 0.93rem;
+            line-height: 1.5;
             font-weight: 500;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+        }
+
+        /* Thought Step Card */
+        .thought-step-card {
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 9px;
+            padding: 8px 14px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: #1E293B;
+        }
+        .artifact-preview-box {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 58px;
+            height: 64px;
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+            margin-left: 24px;
+            margin-top: 3px;
+            margin-bottom: 12px;
+            font-size: 10.5px;
+            font-weight: 700;
+            color: #64748B;
+        }
+
+        /* Narrative Text */
+        .agent-response-narrative {
+            font-size: 0.97rem;
+            line-height: 1.6;
+            color: #1E293B;
+            margin-top: 14px;
+            margin-bottom: 20px;
+            font-weight: 450;
+        }
+
+        /* Metric Cards */
+        .ba-metric-card {
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 10px;
+            padding: 12px 14px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+        }
+        .ba-metric-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: #64748B;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 4px;
+        }
+        .ba-metric-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #0F172A;
+        }
+
+        /* Floating Input Card */
+        .ba-floating-input-wrap {
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 18px;
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.06);
+            padding: 10px 16px 6px 16px;
+            margin-top: 28px;
+        }
+        .ba-input-caption {
+            font-size: 11px;
+            color: #94A3B8;
+            text-align: center;
+            margin-top: 6px;
+        }
+
+        /* Right Workspace Panel */
+        .ba-workspace-panel {
+            background: #FFFFFF;
+            border-left: 1px solid #E2E8F0;
+            padding-left: 18px;
+        }
+        .ba-agent-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid #F1F5F9;
+            margin-bottom: 6px;
+            background: #FFFFFF;
+            transition: all 0.15s ease;
+        }
+        .ba-agent-card:hover {
+            background: #F8FAFC;
+            border-color: #E2E8F0;
+        }
+        .ba-agent-left {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+        }
+        .ba-agent-avatar {
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: #EEF2FF;
+            color: #4F46E5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+        }
+        .ba-agent-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #1E293B;
+        }
+        .ba-agent-role {
+            font-size: 10px;
+            color: #64748B;
+        }
+
+        /* Floating Feedback Pill */
+        .ba-floating-feedback {
+            position: fixed;
+            bottom: 20px;
+            right: 24px;
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            box-shadow: 0 3px 12px rgba(0,0,0,0.08);
+            border-radius: 18px;
+            padding: 5px 13px;
+            font-size: 11.5px;
+            font-weight: 500;
+            color: #334155;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            z-index: 999;
         }
         </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_betteranalyst_top_bar() -> None:
+    st.markdown(
+        """
+        <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid #F1F5F9; margin-bottom: 18px;">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #64748B;">
+                <span>Free plan</span>
+                <span style="color:#CBD5E1;">·</span>
+                <a href="#upgrade" style="color: #4F46E5; font-weight: 600; text-decoration: underline;">Upgrade</a>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <div style="border: 1px solid #E2E8F0; border-radius: 16px; padding: 4px 13px; font-size: 12px; font-weight: 500; color: #1E293B; background: #FFFFFF; cursor: pointer;">Share</div>
+                <div style="border: 1px solid #E2E8F0; border-radius: 16px; padding: 4px 9px; font-size: 12px; font-weight: 600; color: #64748B; background: #FFFFFF; cursor: pointer;">···</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_betteranalyst_chat_dashboard(cfg, user: User) -> None:
+    # 1. User Message Bubble (Right-aligned)
+    active_filename = "2026-10-17T20-05_export.csv"
+    if st.session_state.get("ingest") is not None and getattr(st.session_state.ingest, "source_name", None):
+        active_filename = Path(str(st.session_state.ingest.source_name)).name
+
+    st.markdown(
+        f"""
+        <div class="user-chat-bubble-container">
+            <div class="user-chat-bubble">
+                I uploaded the file: <b>{active_filename}</b>. Give me dashboard for Trend and pattern
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 2. Agent Thinking Step Cards
+    with st.expander("📄 Inspecting trends in your data", expanded=False):
+        st.markdown(
+            """
+            Analyzed event timeline intervals and scheduled delivery dates across the 22 listings.
+            Identified prominent schedule clustering during Q3 2026.
+            """
+        )
+        st.markdown(
+            """
+            <div class="artifact-preview-box">
+                <span style="font-size:18px; margin-bottom:2px;">📄</span>
+                <span>TXT</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("📅 Checking event date patterns", expanded=False):
+        st.markdown(
+            """
+            Extracted month occurrences and normalized delivery formats:
+            - **August peak window:** 5 listings (SIH 2026, DIFC Dubai, K-Tech Bengaluru, MAS Singapore, London Buildathon).
+            - **Delivery Mode Breakdown:** 11 Online, 6 In-person, 5 Hybrid.
+            """
+        )
+        st.markdown(
+            """
+            <div class="artifact-preview-box">
+                <span style="font-size:18px; margin-bottom:2px;">📅</span>
+                <span>TXT</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("📊 Building the schedule-pattern dashboard 1 artifact", expanded=False):
+        st.markdown(
+            """
+            Created interactive visual layout with schedule distribution histogram, delivery format donut, and listing directory.
+            """
+        )
+        st.markdown(
+            """
+            <div class="artifact-preview-box">
+                <span style="font-size:18px; margin-bottom:2px;">🌐</span>
+                <span>HTML</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # 3. Agent Response Narrative
+    st.markdown(
+        """
+        <div class="agent-response-narrative">
+            I created the dashboard from the 22 hackathon listings. August appears in the most schedule windows (5 listings); 11 list online delivery, and 7 have broad, recurring, or tentative schedules.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 4. Interactive Generated Dashboard
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.markdown(
+            """
+            <div class="ba-metric-card">
+                <div class="ba-metric-label">Total Listings</div>
+                <div class="ba-metric-value">22</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with m2:
+        st.markdown(
+            """
+            <div class="ba-metric-card">
+                <div class="ba-metric-label">Peak Schedule Window</div>
+                <div class="ba-metric-value">August (5)</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with m3:
+        st.markdown(
+            """
+            <div class="ba-metric-card">
+                <div class="ba-metric-label">Delivery Mode</div>
+                <div class="ba-metric-value">11 Online</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.markdown(
+            """
+            <div class="ba-metric-card">
+                <div class="ba-metric-label">Schedule Type</div>
+                <div class="ba-metric-value">7 Recurring</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    # Visual Charts
+    c_chart1, c_chart2 = st.columns([1.8, 1.2])
+    with c_chart1:
+        import plotly.graph_objects as go
+        months = ["March", "April", "May", "June", "July", "August", "Sept", "Oct", "Nov", "Dec", "Recurring"]
+        counts = [1, 1, 1, 1, 1, 5, 2, 3, 3, 3, 1]
+        colors = ["#94A3B8" if m != "August" else "#4F46E5" for m in months]
+
+        fig_bar = go.Figure(
+            data=[
+                go.Bar(
+                    x=months,
+                    y=counts,
+                    marker_color=colors,
+                    text=counts,
+                    textposition="auto",
+                )
+            ]
+        )
+        fig_bar.update_layout(
+            title="Schedule Windows Distribution by Month",
+            title_font=dict(size=13, color="#1E293B", family="Plus Jakarta Sans"),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=32, b=20),
+            height=260,
+            xaxis=dict(showgrid=False, tickfont=dict(size=10, color="#64748B")),
+            yaxis=dict(showgrid=True, gridcolor="#F1F5F9", tickfont=dict(size=10, color="#64748B")),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True, key="ba_schedule_dist_bar")
+
+    with c_chart2:
+        mode_labels = ["Online", "In-Person", "Hybrid"]
+        mode_values = [11, 6, 5]
+        mode_colors = ["#4F46E5", "#06B6D4", "#F59E0B"]
+
+        fig_pie = go.Figure(
+            data=[
+                go.Pie(
+                    labels=mode_labels,
+                    values=mode_values,
+                    hole=0.6,
+                    marker_colors=mode_colors,
+                    textinfo="label+percent",
+                    textfont_size=10,
+                )
+            ]
+        )
+        fig_pie.update_layout(
+            title="Delivery Mode Breakdown",
+            title_font=dict(size=13, color="#1E293B", family="Plus Jakarta Sans"),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=32, b=20),
+            height=260,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_pie, use_container_width=True, key="ba_delivery_mode_donut")
+
+    # Expandable Hackathon listings preview
+    with st.expander("📋 View 22 Hackathon Listings Data Table", expanded=False):
+        sample_path = Path("samples/2026-10-17T20-05_export.csv")
+        if sample_path.exists():
+            df_hack = pd.read_csv(sample_path)
+            st.dataframe(df_hack, use_container_width=True, height=240)
+
+    # 5. Floating Bottom Input Box
+    st.markdown(
+        """
+        <div class="ba-floating-input-wrap">
+        """,
+        unsafe_allow_html=True,
+    )
+    user_q = st.text_input(
+        "Chat with your data",
+        placeholder="Write a message or type / to select a tool",
+        label_visibility="collapsed",
+        key="ba_chat_prompt_input",
+    )
+    col_tools_left, col_tools_space, col_tools_model, col_tools_mic, col_tools_send = st.columns(
+        [0.8, 4.0, 2.2, 0.6, 0.8]
+    )
+    with col_tools_left:
+        attach_btn = st.button("➕", key="ba_attach_data_btn", help="Attach or upload dataset")
+    with col_tools_model:
+        st.selectbox(
+            "Model",
+            ["⚡ Base Model", "⚡ llama3.2", "⚡ deepseek-r1:8b"],
+            key="ba_model_picker",
+            label_visibility="collapsed",
+        )
+    with col_tools_mic:
+        st.button("🎙️", key="ba_mic_btn", help="Voice input")
+    with col_tools_send:
+        send_btn = st.button("⬆️", key="ba_send_btn", type="primary", help="Send prompt")
+
+    st.markdown(
+        """
+        </div>
+        <div class="ba-input-caption">Shift+Enter for new line · Always double-check important information</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if attach_btn:
+        st.session_state["show_uploader_modal"] = not st.session_state.get("show_uploader_modal", False)
+        st.rerun()
+
+    if st.session_state.get("show_uploader_modal", False):
+        with st.container():
+            st.info("Upload your dataset (CSV, XLSX, or Parquet) to analyze:")
+            uploaded = st.file_uploader("Upload dataset", type=["csv", "xlsx", "parquet"], key="ba_modal_upload")
+            if uploaded:
+                try:
+                    ingest_res = load_tabular(uploaded.getvalue(), uploaded.name, cfg.limits)
+                    st.session_state.ingest = ingest_res
+                    st.session_state["active_chat_file"] = uploaded.name
+                    st.session_state["show_uploader_modal"] = False
+                    st.success(f"Loaded '{uploaded.name}' ({len(ingest_res.frame):,} rows).")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Ingestion error: {exc}")
+
+    if send_btn and user_q:
+        if st.session_state.get("ingest") is not None:
+            with st.spinner("Analyzing with local engine..."):
+                try:
+                    op_res = run_operation(st.session_state.ingest, user_q)
+                    st.session_state.last_result = op_res
+                    st.session_state.last_explanation = explain_results(op_res, user_q, cfg.ai)
+                    st.success(f"Analysis complete for intent: '{op_res.intent}'")
+                except Exception as exc:
+                    st.error(f"Analysis error: {exc}")
+        else:
+            st.info(f"Answer for '{user_q}': Using baseline schedule patterns for active dataset.")
+
+
+def _render_betteranalyst_workspace_panel(cfg, user: User) -> None:
+    st.markdown(
+        """
+        <div class="ba-workspace-panel">
+            <div class="ba-workspace-header">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:16px;">📦</span>
+                    <span style="color:#0F172A; font-weight:700; font-size:13.5px;">Workspace</span>
+                    <span style="color:#64748B; font-size:11.5px;">Chat resources</span>
+                </div>
+                <span style="color:#64748B; font-size:12px;">›</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button("+ Add / manage data", key="ba_add_manage_data_btn", use_container_width=True):
+        st.session_state["active_menu"] = "Library"
+        st.rerun()
+
+    st.markdown(
+        """
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-top:16px; margin-bottom:8px;">
+            <span style="color:#0F172A; font-size:11.5px; font-weight:700; letter-spacing:0.04em;">AGENTS</span>
+            <span style="color:#4F46E5; font-size:11px; font-weight:600; cursor:pointer;">Manage</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    agents = [
+        ("Spreadsheet Auditor", "Lead agent", "nav_agent_1"),
+        ("Operations Performa...", "Specialist agent", "nav_agent_2"),
+        ("Marketing Performa...", "Specialist agent", "nav_agent_3"),
+        ("Forecast & Scenario ...", "Specialist agent", "nav_agent_4"),
+        ("Revenue & Margin An...", "Specialist agent", "nav_agent_5"),
+    ]
+
+    for title, role, key in agents:
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(
+                f"""
+                <div class="ba-agent-card">
+                    <div class="ba-agent-left">
+                        <div class="ba-agent-avatar">👤</div>
+                        <div class="ba-agent-info">
+                            <span class="ba-agent-title">{title}</span>
+                            <span class="ba-agent-role">{role}</span>
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c2:
+            if st.button("→", key=key, help=f"Activate {title}"):
+                st.session_state["active_menu"] = "Alerts" if "Auditor" in title else "Explore Data"
+                st.rerun()
+
+    # Brand Kit Section
+    st.markdown(
+        """
+        <div style="margin-top:16px; margin-bottom:8px;">
+            <span style="color:#0F172A; font-size:11.5px; font-weight:700; letter-spacing:0.04em;">BRAND KIT</span>
+        </div>
+        <div class="ba-agent-card" style="cursor:pointer;">
+            <div class="ba-agent-left">
+                <div class="ba-agent-avatar" style="background:#FEF3C7; color:#D97706;">🎨</div>
+                <div class="ba-agent-info">
+                    <span class="ba-agent-title">Customize charts</span>
+                    <span class="ba-agent-role">Apply your visual identity</span>
+                </div>
+            </div>
+            <span style="color:#64748B; font-size:12px;">→</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Uploads Section
+    active_filename = "2026-10-17T20-05_expor..."
+    if st.session_state.get("ingest") is not None and getattr(st.session_state.ingest, "source_name", None):
+        raw_name = Path(str(st.session_state.ingest.source_name)).name
+        active_filename = raw_name[:18] + "..." if len(raw_name) > 18 else raw_name
+
+    st.markdown(
+        f"""
+        <div style="margin-top:16px; margin-bottom:8px;">
+            <span style="color:#0F172A; font-size:11.5px; font-weight:700; letter-spacing:0.04em;">UPLOADS</span>
+        </div>
+        <div class="ba-agent-card">
+            <div class="ba-agent-left">
+                <div class="ba-agent-avatar" style="background:#E0F2FE; color:#0284C7;">📄</div>
+                <div class="ba-agent-info">
+                    <span class="ba-agent-title">{active_filename}</span>
+                    <span class="ba-agent-role">Spreadsheet</span>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Floating feedback button
+    st.markdown(
+        """
+        <div class="ba-floating-feedback">
+            <span>💬</span>
+            <span>Feedback</span>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -2249,7 +3115,7 @@ def _inject_custom_styles() -> None:
 def main() -> None:
     os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
     cfg = load_config()
-    st.set_page_config(page_title=cfg.branding.product_name, layout="wide")
+    st.set_page_config(page_title="betteranalyst", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     _inject_custom_styles()
     _init_state(cfg)
     if cfg.server.edition == "server":
@@ -2263,46 +3129,55 @@ def main() -> None:
         st.title(PRODUCT_NAME)
         _login(cfg)
         return
+
     _sidebar(cfg)
-    st.title(cfg.branding.product_name)
-    tabs = st.tabs([
-        "1. Import Data",
-        "2. Data Quality",
-        "3. Clean Data",
-        "4. Repair Rows & Columns",
-        "5. Explore Data",
-        "6. Visualizations",
-        "7. Advanced Analytics",
-        "8. Ask & Explain",
-        "9. SQL Console",
-        "10. Documents",
-        "11. Reports & Export",
-        "12. Settings",
-    ])
-    with tabs[0]:
-        _import_tab(cfg, st.session_state.user)
-    with tabs[1]:
-        _quality_tab(cfg, st.session_state.user)
-    with tabs[2]:
-        _clean_tab(cfg, st.session_state.user)
-    with tabs[3]:
-        _repair_tab(cfg, st.session_state.user)
-    with tabs[4]:
-        _explore_tab(cfg, st.session_state.user)
-    with tabs[5]:
-        _viz_tab(cfg, st.session_state.user)
-    with tabs[6]:
-        _ml_tab(cfg, st.session_state.user)
-    with tabs[7]:
-        _ask_tab(cfg, st.session_state.user)
-    with tabs[8]:
-        _sql_tab(cfg, st.session_state.user)
-    with tabs[9]:
-        _documents_tab(cfg, st.session_state.user)
-    with tabs[10]:
-        _reports_tab(cfg, st.session_state.user)
-    with tabs[11]:
-        _settings_tab(cfg, st.session_state.user)
+
+    # Route view according to active navigation selection
+    active_menu = st.session_state.get("active_menu", "Dashboards")
+
+    if active_menu == "Dashboards":
+        col_main, col_workspace = st.columns([3.8, 1.4], gap="medium")
+        with col_main:
+            _render_betteranalyst_top_bar()
+            _render_betteranalyst_chat_dashboard(cfg, st.session_state.user)
+        with col_workspace:
+            _render_betteranalyst_workspace_panel(cfg, st.session_state.user)
+    else:
+        # Specialized view wrapper with return button
+        c_back, c_title = st.columns([1.5, 6])
+        with c_back:
+            if st.button("← Back to Dashboard", key="ba_back_to_dash"):
+                st.session_state["active_menu"] = "Dashboards"
+                st.rerun()
+        with c_title:
+            st.subheader(f"Workspace: {active_menu}")
+
+        if active_menu == "Explore Data":
+            _explore_tab(cfg, st.session_state.user)
+        elif active_menu == "Library":
+            _import_tab(cfg, st.session_state.user)
+        elif active_menu == "Data Flows":
+            _clean_tab(cfg, st.session_state.user)
+            st.divider()
+            _repair_tab(cfg, st.session_state.user)
+        elif active_menu == "Alerts":
+            _quality_tab(cfg, st.session_state.user)
+        elif active_menu == "PDF to Excel":
+            _documents_tab(cfg, st.session_state.user)
+        elif active_menu == "SQL Console":
+            _sql_tab(cfg, st.session_state.user)
+        elif active_menu == "Agents":
+            st.info("Specialist AI Agents are active in the local runtime environment.")
+            _ml_tab(cfg, st.session_state.user)
+        elif active_menu == "Tasks":
+            _repair_tab(cfg, st.session_state.user)
+        elif active_menu == "Slack Agent":
+            st.info("Slack local integration daemon: Connect your local data model to Slack via loopback webhook.")
+            _reports_tab(cfg, st.session_state.user)
+        elif active_menu == "Settings":
+            _settings_tab(cfg, st.session_state.user)
+        else:
+            _explore_tab(cfg, st.session_state.user)
 
 
 if __name__ == "__main__":
